@@ -4,6 +4,12 @@ trading:
   pairs:
     - "BTC/USDT"
     - "ETH/USDT"
+    - "LINK/USDT"
+    - "AVAX/USDT"
+    - "BNB/USDT"
+    - "SOL/USDT"
+    - "DOGE/USDT"
+    - "ADA/USDT"
   timeframe: "1h"            # K 線週期
   check_interval_seconds: 60 # 主迴圈執行間隔（秒）
 

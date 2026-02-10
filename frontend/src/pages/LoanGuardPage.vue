@@ -27,17 +27,24 @@ function selectPair(pair: string) {
   selectedPair.value = selectedPair.value === pair ? '' : pair
 }
 
+// 閾值：與 config.yaml loan_guard 保持一致
+const DANGER_LTV = 0.75
+const LOW_LTV = 0.40
+const WARN_RANGE = 0.05 // 距離邊界 5% 以內才警告
+
 function ltvColor(ltv: number) {
-  if (ltv >= 0.75) return 'text-(--color-danger)'
-  if (ltv >= 0.65) return 'text-(--color-warning)'
-  if (ltv <= 0.4) return 'text-(--color-success)'
+  if (ltv >= DANGER_LTV) return 'text-(--color-danger)'
+  if (ltv >= DANGER_LTV - WARN_RANGE) return 'text-(--color-warning)'
+  if (ltv <= LOW_LTV) return 'text-(--color-success)'
+  if (ltv <= LOW_LTV + WARN_RANGE) return 'text-(--color-success)'
   return 'text-(--color-text-primary)'
 }
 
 function ltvBgColor(ltv: number) {
-  if (ltv >= 0.75) return 'bg-(--color-danger)'
-  if (ltv >= 0.65) return 'bg-(--color-warning)'
-  if (ltv <= 0.4) return 'bg-(--color-success)'
+  if (ltv >= DANGER_LTV) return 'bg-(--color-danger)'
+  if (ltv >= DANGER_LTV - WARN_RANGE) return 'bg-(--color-warning)'
+  if (ltv <= LOW_LTV) return 'bg-(--color-success)'
+  if (ltv <= LOW_LTV + WARN_RANGE) return 'bg-(--color-success)'
   return 'bg-(--color-accent)'
 }
 

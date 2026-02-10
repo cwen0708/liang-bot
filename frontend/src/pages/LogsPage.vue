@@ -18,7 +18,8 @@ const filteredLogs = computed(() => {
       (l) => l.message.toLowerCase().includes(q) || l.module.toLowerCase().includes(q),
     )
   }
-  return result
+  // 按 created_at 降序（毫秒精度），避免同秒批次日誌順序錯亂
+  return [...result].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
 })
 
 function levelColor(level: string) {
@@ -32,7 +33,10 @@ function levelColor(level: string) {
 }
 
 function formatTime(ts: string) {
-  return new Date(ts).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const d = new Date(ts)
+  const hms = d.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const ms = String(d.getMilliseconds()).padStart(3, '0')
+  return `${hms}.${ms}`
 }
 </script>
 
@@ -69,7 +73,7 @@ function formatTime(ts: string) {
           :key="log.id"
           class="flex gap-3 px-4 py-1 border-b border-(--color-border)/30 hover:bg-(--color-bg-secondary)/50"
         >
-          <span class="text-(--color-text-secondary) shrink-0 w-16">{{ formatTime(log.created_at) }}</span>
+          <span class="text-(--color-text-secondary) shrink-0 w-24">{{ formatTime(log.created_at) }}</span>
           <span class="shrink-0 w-16 font-bold" :class="levelColor(log.level)">{{ log.level }}</span>
           <span class="text-(--color-text-secondary) shrink-0 w-24 truncate">{{ log.module }}</span>
           <span class="text-(--color-text-primary) break-all">{{ log.message }}</span>

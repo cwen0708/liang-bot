@@ -102,9 +102,6 @@ class TradingBot:
         # 借貸去重：記錄每個交易對上次寫入的 LTV，相同就跳過
         self._last_ltv: dict[str, float] = {}
 
-        # 策略去重：記錄每個交易對上次的結論摘要，相同就跳過 LLM
-        self._last_verdict_key: dict[str, str] = {}
-
         self._running = False
         self._start_time: float = 0.0
         self._config_version: int = 0
@@ -420,17 +417,6 @@ class TradingBot:
                 "%s所有策略信心低於 %.2f → 跳過 LLM，使用加權投票", _L2, min_conf
             )
 
-        # 策略結論去重：signal + confidence 完全相同 → 跳過 LLM，沿用上次結果
-        verdict_key = "|".join(
-            f"{v.strategy}:{v.signal.value}:{v.confidence:.4f}" for v in sorted(verdicts, key=lambda x: x.strategy)
-        )
-        if self.llm_engine.enabled and qualified:
-            if self._last_verdict_key.get(symbol) == verdict_key:
-                logger.info("%s策略結論與上輪相同，跳過 LLM", _L2)
-                vote_result = self.router.weighted_vote()
-                return vote_result.signal, vote_result.confidence
-            self._last_verdict_key[symbol] = verdict_key
-
         if self.llm_engine.enabled and qualified:
             try:
                 portfolio = self._build_portfolio_state(symbol, current_price)
@@ -573,12 +559,9 @@ class TradingBot:
             label = f"{collateral_coin}→{loan_coin}"
             pair_key = f"{collateral_coin}/{loan_coin}"
 
-            # 判斷是否需要觸發 action
-            needs_action = ltv >= lg.danger_ltv or ltv <= lg.low_ltv
-
-            # LTV 跟上次一樣且不需要 action → 跳過寫入，節省空間
+            # LTV 跟上次一樣 → 跳過寫入和 AI 審核，節省空間和 API 費用
             ltv_rounded = round(ltv, 4)
-            if not needs_action and self._last_ltv.get(pair_key) == ltv_rounded:
+            if self._last_ltv.get(pair_key) == ltv_rounded:
                 logger.debug("%s[借款] %s LTV=%.1f%% 無變化，跳過", _L1, label, ltv * 100)
                 continue
             self._last_ltv[pair_key] = ltv_rounded

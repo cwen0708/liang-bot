@@ -102,6 +102,9 @@ class TradingBot:
         # 借貸去重：記錄每個交易對上次寫入的 LTV，相同就跳過
         self._last_ltv: dict[str, float] = {}
 
+        # 策略去重：記錄每個交易對上次的結論摘要，相同就跳過 LLM
+        self._last_verdict_key: dict[str, str] = {}
+
         self._running = False
         self._start_time: float = 0.0
         self._config_version: int = 0
@@ -416,6 +419,17 @@ class TradingBot:
             logger.info(
                 "%s所有策略信心低於 %.2f → 跳過 LLM，使用加權投票", _L2, min_conf
             )
+
+        # 策略結論去重：signal + confidence 完全相同 → 跳過 LLM，沿用上次結果
+        verdict_key = "|".join(
+            f"{v.strategy}:{v.signal.value}:{v.confidence:.4f}" for v in sorted(verdicts, key=lambda x: x.strategy)
+        )
+        if self.llm_engine.enabled and qualified:
+            if self._last_verdict_key.get(symbol) == verdict_key:
+                logger.info("%s策略結論與上輪相同，跳過 LLM", _L2)
+                vote_result = self.router.weighted_vote()
+                return vote_result.signal, vote_result.confidence
+            self._last_verdict_key[symbol] = verdict_key
 
         if self.llm_engine.enabled and qualified:
             try:

@@ -83,8 +83,8 @@ function signalColor(signal: string) {
                 {{ (d.confidence * 100).toFixed(0) }}% &middot; {{ formatTime(d.created_at) }}
               </div>
             </div>
-            <div class="text-xs text-(--color-text-secondary) mt-2">{{ d.reasoning }}</div>
-            <div class="text-xs text-(--color-text-secondary)/60 mt-1">Model: {{ d.model }}</div>
+            <div class="text-sm text-(--color-text-secondary) mt-2 leading-relaxed">{{ d.reasoning }}</div>
+            <div class="text-xs text-(--color-text-secondary)/60 mt-2">Model: {{ d.model }}</div>
           </div>
         </div>
       </div>

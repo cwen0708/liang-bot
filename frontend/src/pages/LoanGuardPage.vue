@@ -1,11 +1,35 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { createChart, type IChartApi, type UTCTimestamp, ColorType, BaselineSeries } from 'lightweight-charts'
 import { useRealtimeTable } from '@/composables/useRealtime'
 import type { LoanHealth } from '@/types'
 
-const { rows: loanHistory, loading } = useRealtimeTable<LoanHealth>('loan_health', { limit: 100 })
+const { rows: loanHistory, loading } = useRealtimeTable<LoanHealth>('loan_health', { limit: 200 })
 
-const selectedPair = ref('')
+// 閾值：與 config.yaml loan_guard 保持一致
+const DANGER_LTV = 0.75
+const LOW_LTV = 0.40
+const WARN_RANGE = 0.05
+
+// 每個幣種的圖表容器 refs
+const chartRefs = ref<Record<string, HTMLElement | null>>({})
+const charts = new Map<string, { chart: IChartApi; series: any }>()
+
+// 按幣種分組的歷史記錄（時間升序）
+const historyByPair = computed(() => {
+  const map = new Map<string, LoanHealth[]>()
+  for (const l of loanHistory.value) {
+    const key = `${l.collateral_coin}/${l.loan_coin}`
+    if (!map.has(key)) map.set(key, [])
+    map.get(key)!.push(l)
+  }
+  for (const [, arr] of map) {
+    arr.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+  }
+  return map
+})
+
+const pairKeys = computed(() => [...historyByPair.value.keys()].sort())
 
 const latestPerPair = computed(() => {
   const map = new Map<string, LoanHealth>()
@@ -13,24 +37,8 @@ const latestPerPair = computed(() => {
     const key = `${l.collateral_coin}/${l.loan_coin}`
     if (!map.has(key)) map.set(key, l)
   }
-  return [...map.values()]
+  return map
 })
-
-const filteredHistory = computed(() => {
-  if (!selectedPair.value) return loanHistory.value
-  return loanHistory.value.filter(
-    (l) => `${l.collateral_coin}/${l.loan_coin}` === selectedPair.value,
-  )
-})
-
-function selectPair(pair: string) {
-  selectedPair.value = selectedPair.value === pair ? '' : pair
-}
-
-// 閾值：與 config.yaml loan_guard 保持一致
-const DANGER_LTV = 0.75
-const LOW_LTV = 0.40
-const WARN_RANGE = 0.05 // 距離邊界 5% 以內才警告
 
 function ltvColor(ltv: number) {
   if (ltv >= DANGER_LTV) return 'text-(--color-danger)'
@@ -48,146 +56,179 @@ function ltvBgColor(ltv: number) {
   return 'bg-(--color-accent)'
 }
 
-function formatTime(ts: string) {
-  return new Date(ts).toLocaleString('zh-TW')
+function setChartRef(el: any, pair: string) {
+  if (el) chartRefs.value[pair] = el as HTMLElement
 }
 
-function formatTimeShort(ts: string) {
-  return new Date(ts).toLocaleString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+function createMiniChart(pair: string) {
+  const container = chartRefs.value[pair]
+  if (!container) return
+
+  if (charts.has(pair)) {
+    charts.get(pair)!.chart.remove()
+    charts.delete(pair)
+  }
+
+  const chart = createChart(container, {
+    width: container.clientWidth,
+    height: 80,
+    layout: {
+      background: { type: ColorType.Solid, color: 'transparent' },
+      textColor: '#64748b',
+      fontSize: 9,
+    },
+    grid: {
+      vertLines: { visible: false },
+      horzLines: { color: '#1e293b', style: 2 },
+    },
+    rightPriceScale: {
+      borderVisible: false,
+      scaleMargins: { top: 0.1, bottom: 0.1 },
+    },
+    timeScale: {
+      borderVisible: false,
+      timeVisible: true,
+      fixLeftEdge: true,
+      fixRightEdge: true,
+    },
+    crosshair: {
+      vertLine: { visible: false },
+      horzLine: { visible: false },
+    },
+    handleScroll: false,
+    handleScale: false,
+  })
+
+  // Baseline series: 以 target_ltv (65%) 為基線
+  // 高於 65% 偏紅（接近危險），低於 65% 偏綠（質押物升值）
+  const series = chart.addSeries(BaselineSeries, {
+    baseValue: { type: 'price', price: 65 },
+    topLineColor: '#ef4444',
+    topFillColor1: 'rgba(239,68,68,0.15)',
+    topFillColor2: 'rgba(239,68,68,0.02)',
+    bottomLineColor: '#22c55e',
+    bottomFillColor1: 'rgba(34,197,94,0.02)',
+    bottomFillColor2: 'rgba(34,197,94,0.15)',
+    lineWidth: 2,
+    priceFormat: { type: 'custom', formatter: (p: number) => `${p.toFixed(1)}%` },
+  })
+
+  charts.set(pair, { chart, series })
 }
+
+function updateChartData(pair: string) {
+  const entry = charts.get(pair)
+  if (!entry) return
+  const history = historyByPair.value.get(pair)
+  if (!history || !history.length) return
+
+  const data = history.map((h) => ({
+    time: Math.floor(new Date(h.created_at).getTime() / 1000) as UTCTimestamp,
+    value: h.ltv * 100,
+  }))
+  entry.series.setData(data)
+  entry.chart.timeScale().fitContent()
+}
+
+function handleResize() {
+  for (const [pair, entry] of charts) {
+    const container = chartRefs.value[pair]
+    if (container) {
+      entry.chart.applyOptions({ width: container.clientWidth })
+    }
+  }
+}
+
+watch(
+  () => pairKeys.value,
+  async (keys) => {
+    await nextTick()
+    for (const pair of keys) {
+      if (!charts.has(pair)) createMiniChart(pair)
+      updateChartData(pair)
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => loanHistory.value.length,
+  () => {
+    for (const pair of pairKeys.value) updateChartData(pair)
+  },
+)
+
+onMounted(() => {
+  window.addEventListener('resize', handleResize)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+  for (const entry of charts.values()) entry.chart.remove()
+  charts.clear()
+})
 </script>
 
 <template>
   <div class="p-4 md:p-6 space-y-4 md:space-y-6">
     <h2 class="text-xl md:text-2xl font-bold">借貸監控</h2>
 
-    <!-- Current LTV Gauges (clickable to filter) -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
-      <div v-for="l in latestPerPair" :key="`${l.collateral_coin}/${l.loan_coin}`"
-           class="bg-(--color-bg-card) border-2 rounded-xl p-3 md:p-4 cursor-pointer transition-all"
-           :class="selectedPair === `${l.collateral_coin}/${l.loan_coin}`
-             ? 'border-(--color-accent) ring-1 ring-(--color-accent)/30'
-             : 'border-(--color-border) hover:border-(--color-text-secondary)'"
-           @click="selectPair(`${l.collateral_coin}/${l.loan_coin}`)">
-        <div class="flex justify-between items-center">
-          <div class="text-xs text-(--color-text-secondary) uppercase">
-            {{ l.collateral_coin }} / {{ l.loan_coin }}
+    <div v-if="loading" class="text-sm text-(--color-text-secondary)">載入中...</div>
+    <div v-else-if="!pairKeys.length" class="text-sm text-(--color-text-secondary)">無借貸記錄</div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div
+        v-for="pair in pairKeys"
+        :key="pair"
+        class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4"
+      >
+        <!-- 頂部：幣種 + 當前 LTV + 細節 -->
+        <div class="flex justify-between items-start">
+          <div>
+            <div class="text-xs text-(--color-text-secondary) uppercase font-medium">{{ pair }}</div>
+            <div
+              v-if="latestPerPair.get(pair)"
+              class="text-2xl font-bold mt-1"
+              :class="ltvColor(latestPerPair.get(pair)!.ltv)"
+            >
+              {{ (latestPerPair.get(pair)!.ltv * 100).toFixed(1) }}%
+            </div>
           </div>
-          <svg v-if="selectedPair === `${l.collateral_coin}/${l.loan_coin}`"
-               class="w-4 h-4 text-(--color-accent)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
+          <div v-if="latestPerPair.get(pair)" class="text-right text-xs text-(--color-text-secondary) space-y-0.5">
+            <div>負債: {{ latestPerPair.get(pair)!.total_debt.toFixed(2) }} {{ latestPerPair.get(pair)!.loan_coin }}</div>
+            <div>質押: {{ latestPerPair.get(pair)!.collateral_amount.toFixed(4) }} {{ latestPerPair.get(pair)!.collateral_coin }}</div>
+            <div
+              v-if="latestPerPair.get(pair)!.action_taken !== 'none'"
+              class="font-medium"
+              :class="latestPerPair.get(pair)!.action_taken === 'protect' ? 'text-(--color-warning)' : 'text-(--color-success)'"
+            >
+              {{ latestPerPair.get(pair)!.action_taken === 'protect' ? '保護' : '獲利了結' }}
+            </div>
+          </div>
         </div>
-        <div class="text-2xl md:text-3xl font-bold mt-2" :class="ltvColor(l.ltv)">
-          {{ (l.ltv * 100).toFixed(1) }}%
-        </div>
-        <!-- LTV bar -->
-        <div class="mt-3 h-2 bg-(--color-bg-secondary) rounded-full overflow-hidden">
+
+        <!-- LTV 進度條 -->
+        <div class="mt-3 h-1.5 bg-(--color-bg-secondary) rounded-full overflow-hidden">
           <div
+            v-if="latestPerPair.get(pair)"
             class="h-full rounded-full transition-all duration-500"
-            :class="ltvBgColor(l.ltv)"
-            :style="{ width: `${Math.min(l.ltv * 100, 100)}%` }"
+            :class="ltvBgColor(latestPerPair.get(pair)!.ltv)"
+            :style="{ width: `${Math.min(latestPerPair.get(pair)!.ltv * 100, 100)}%` }"
           />
         </div>
-        <div class="flex justify-between text-[10px] text-(--color-text-secondary) mt-1">
+        <div class="flex justify-between text-[9px] text-(--color-text-secondary) mt-0.5">
           <span>0%</span>
-          <span>40%</span>
+          <span class="text-(--color-success)">40%</span>
           <span>65%</span>
-          <span>75%</span>
+          <span class="text-(--color-danger)">75%</span>
         </div>
-        <div class="mt-2 text-xs text-(--color-text-secondary) space-y-0.5">
-          <div>負債: {{ l.total_debt.toFixed(2) }} {{ l.loan_coin }}</div>
-          <div>質押: {{ l.collateral_amount.toFixed(4) }} {{ l.collateral_coin }}</div>
-          <div v-if="l.action_taken !== 'none'" class="font-medium"
-               :class="l.action_taken === 'protect' ? 'text-(--color-warning)' : 'text-(--color-success)'">
-            {{ l.action_taken === 'protect' ? '保護' : l.action_taken === 'take_profit' ? '獲利了結' : l.action_taken }}
-          </div>
-        </div>
-      </div>
-    </div>
 
-    <!-- Filter indicator -->
-    <div v-if="selectedPair" class="flex items-center gap-2 text-sm">
-      <span class="text-(--color-text-secondary)">篩選:</span>
-      <span class="px-2 py-0.5 bg-(--color-accent)/20 text-(--color-accent) rounded text-xs font-medium">
-        {{ selectedPair }}
-      </span>
-      <button @click="selectedPair = ''" class="text-xs text-(--color-text-secondary) hover:text-(--color-text-primary)">
-        清除
-      </button>
-    </div>
-
-    <!-- History -->
-    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl overflow-hidden">
-      <h3 class="text-sm font-semibold text-(--color-text-secondary) uppercase px-4 py-3 bg-(--color-bg-secondary)">
-        LTV 歷史
-        <span v-if="selectedPair" class="text-(--color-accent) normal-case"> - {{ selectedPair }}</span>
-      </h3>
-
-      <!-- Desktop table -->
-      <div class="hidden md:block">
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="text-(--color-text-secondary) text-left border-b border-(--color-border)">
-              <th class="px-4 py-2">時間</th>
-              <th class="px-4 py-2">交易對</th>
-              <th class="px-4 py-2">LTV</th>
-              <th class="px-4 py-2">負債</th>
-              <th class="px-4 py-2">質押物</th>
-              <th class="px-4 py-2">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-if="loading">
-              <td colspan="6" class="px-4 py-8 text-center text-(--color-text-secondary)">載入中...</td>
-            </tr>
-            <tr v-else-if="!filteredHistory.length">
-              <td colspan="6" class="px-4 py-8 text-center text-(--color-text-secondary)">無記錄</td>
-            </tr>
-            <tr v-for="l in filteredHistory" :key="l.id" class="border-t border-(--color-border) hover:bg-(--color-bg-secondary)/50">
-              <td class="px-4 py-2 text-(--color-text-secondary)">{{ formatTime(l.created_at) }}</td>
-              <td class="px-4 py-2">{{ l.collateral_coin }}/{{ l.loan_coin }}</td>
-              <td class="px-4 py-2 font-medium" :class="ltvColor(l.ltv)">{{ (l.ltv * 100).toFixed(1) }}%</td>
-              <td class="px-4 py-2">{{ l.total_debt.toFixed(2) }}</td>
-              <td class="px-4 py-2">{{ l.collateral_amount.toFixed(8) }}</td>
-              <td class="px-4 py-2">
-                <span v-if="l.action_taken !== 'none'"
-                      class="px-2 py-0.5 rounded text-xs"
-                      :class="{
-                        'bg-(--color-warning)/20 text-(--color-warning)': l.action_taken === 'protect',
-                        'bg-(--color-success)/20 text-(--color-success)': l.action_taken === 'take_profit',
-                      }">
-                  {{ l.action_taken === 'protect' ? '保護' : l.action_taken === 'take_profit' ? '獲利了結' : l.action_taken }}
-                </span>
-                <span v-else class="text-(--color-text-secondary)">-</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Mobile cards -->
-      <div class="md:hidden divide-y divide-(--color-border)">
-        <div v-if="loading" class="p-8 text-center text-sm text-(--color-text-secondary)">載入中...</div>
-        <div v-else-if="!filteredHistory.length" class="p-8 text-center text-sm text-(--color-text-secondary)">無記錄</div>
-        <div v-for="l in filteredHistory" :key="l.id" class="p-3">
-          <div class="flex justify-between items-center">
-            <span class="text-sm font-medium">{{ l.collateral_coin }}/{{ l.loan_coin }}</span>
-            <span class="font-bold" :class="ltvColor(l.ltv)">{{ (l.ltv * 100).toFixed(1) }}%</span>
-          </div>
-          <div class="flex justify-between items-center mt-1 text-xs text-(--color-text-secondary)">
-            <span>{{ formatTimeShort(l.created_at) }}</span>
-            <span v-if="l.action_taken !== 'none'"
-                  class="px-2 py-0.5 rounded"
-                  :class="{
-                    'bg-(--color-warning)/20 text-(--color-warning)': l.action_taken === 'protect',
-                    'bg-(--color-success)/20 text-(--color-success)': l.action_taken === 'take_profit',
-                  }">
-              {{ l.action_taken === 'protect' ? '保護' : '獲利了結' }}
-            </span>
-            <span v-else>-</span>
-          </div>
-        </div>
+        <!-- 迷你 LTV 曲線圖 -->
+        <div
+          :ref="(el) => setChartRef(el, pair)"
+          class="mt-2 w-full"
+          style="height: 80px"
+        />
       </div>
     </div>
   </div>

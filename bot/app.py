@@ -99,6 +99,9 @@ class TradingBot:
         # 記錄每個交易對最後一根 K 線的時間戳（避免小時線未更新時重複計算 OHLCV 策略）
         self._last_candle_time: dict[str, object] = {}
 
+        # 借貸去重：記錄每個交易對上次寫入的 LTV，相同就跳過
+        self._last_ltv: dict[str, float] = {}
+
         self._running = False
         self._start_time: float = 0.0
         self._config_version: int = 0
@@ -554,6 +557,17 @@ class TradingBot:
             debt = float(o.get("totalDebt", 0))
             collateral_amt = float(o.get("collateralAmount", 0))
             label = f"{collateral_coin}→{loan_coin}"
+            pair_key = f"{collateral_coin}/{loan_coin}"
+
+            # 判斷是否需要觸發 action
+            needs_action = ltv >= lg.danger_ltv or ltv <= lg.low_ltv
+
+            # LTV 跟上次一樣且不需要 action → 跳過寫入，節省空間
+            ltv_rounded = round(ltv, 4)
+            if not needs_action and self._last_ltv.get(pair_key) == ltv_rounded:
+                logger.debug("%s[借款] %s LTV=%.1f%% 無變化，跳過", _L1, label, ltv * 100)
+                continue
+            self._last_ltv[pair_key] = ltv_rounded
 
             # 寫入 loan health 快照（action 先寫 none，AI 核准後才更新）
             lh_row_id = self._db.insert_loan_health({

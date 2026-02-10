@@ -19,8 +19,26 @@ body {
   background-color: var(--color-bg-primary);
   color: var(--color-text-primary);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 #app {
   min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* Mobile safe area for bottom tab bar (iPhone notch/home indicator) */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Mobile-friendly table: horizontal scroll */
+.table-responsive {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Hide scrollbar on mobile tab bar */
+nav::-webkit-scrollbar {
+  display: none;
 }

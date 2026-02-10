@@ -40,7 +40,7 @@ onMounted(() => {
 
   chart = createChart(chartContainer.value, {
     width: chartContainer.value.clientWidth,
-    height: 400,
+    height: window.innerWidth < 768 ? 250 : 400,
     layout: {
       background: { type: ColorType.Solid, color: '#1a2332' },
       textColor: '#94a3b8',
@@ -61,7 +61,6 @@ onMounted(() => {
 
   loadChartData()
 
-  // Realtime price updates
   const channel = supabase
     .channel('chart:snapshots')
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'market_snapshots' }, (p) => {
@@ -77,7 +76,10 @@ onMounted(() => {
 
   const resizeObserver = new ResizeObserver(() => {
     if (chart && chartContainer.value) {
-      chart.applyOptions({ width: chartContainer.value.clientWidth })
+      chart.applyOptions({
+        width: chartContainer.value.clientWidth,
+        height: window.innerWidth < 768 ? 250 : 400,
+      })
     }
   })
   resizeObserver.observe(chartContainer.value)
@@ -93,9 +95,9 @@ watch(selectedSymbol, () => loadChartData())
 </script>
 
 <template>
-  <div class="p-6 space-y-6">
+  <div class="p-4 md:p-6 space-y-4 md:space-y-6">
     <div class="flex items-center justify-between">
-      <h2 class="text-2xl font-bold">交易</h2>
+      <h2 class="text-xl md:text-2xl font-bold">交易</h2>
       <select
         v-model="selectedSymbol"
         class="bg-(--color-bg-card) border border-(--color-border) rounded-lg px-3 py-1.5 text-sm"
@@ -107,42 +109,68 @@ watch(selectedSymbol, () => loadChartData())
     </div>
 
     <!-- Chart -->
-    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4">
+    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2 md:p-4">
       <div ref="chartContainer" class="w-full" />
     </div>
 
-    <!-- Positions -->
-    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4">
+    <!-- Positions: card layout on mobile, table on desktop -->
+    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4">
       <h3 class="text-sm font-semibold text-(--color-text-secondary) uppercase mb-3">持倉中</h3>
-      <table class="w-full text-sm">
-        <thead>
-          <tr class="text-(--color-text-secondary) text-left">
-            <th class="pb-2">交易對</th>
-            <th class="pb-2">數量</th>
-            <th class="pb-2">進場價</th>
-            <th class="pb-2">現價</th>
-            <th class="pb-2">損益</th>
-            <th class="pb-2">停損 / 停利</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="pos in bot.positions" :key="pos.symbol" class="border-t border-(--color-border)">
-            <td class="py-2 font-medium">{{ pos.symbol }}</td>
-            <td>{{ pos.quantity.toFixed(6) }}</td>
-            <td>${{ pos.entry_price.toFixed(2) }}</td>
-            <td>${{ (bot.latestPrices[pos.symbol] ?? pos.current_price).toFixed(2) }}</td>
-            <td :class="pos.unrealized_pnl >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'">
-              {{ pos.unrealized_pnl >= 0 ? '+' : '' }}{{ pos.unrealized_pnl.toFixed(2) }}
-            </td>
-            <td class="text-(--color-text-secondary)">
-              {{ pos.stop_loss?.toFixed(2) ?? '-' }} / {{ pos.take_profit?.toFixed(2) ?? '-' }}
-            </td>
-          </tr>
-          <tr v-if="!bot.positions.length">
-            <td colspan="6" class="py-4 text-center text-(--color-text-secondary)">尚無持倉</td>
-          </tr>
-        </tbody>
-      </table>
+
+      <!-- Desktop table -->
+      <div class="hidden md:block table-responsive">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-(--color-text-secondary) text-left">
+              <th class="pb-2">交易對</th>
+              <th class="pb-2">數量</th>
+              <th class="pb-2">進場價</th>
+              <th class="pb-2">現價</th>
+              <th class="pb-2">損益</th>
+              <th class="pb-2">停損 / 停利</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="pos in bot.positions" :key="pos.symbol" class="border-t border-(--color-border)">
+              <td class="py-2 font-medium">{{ pos.symbol }}</td>
+              <td>{{ pos.quantity.toFixed(6) }}</td>
+              <td>${{ pos.entry_price.toFixed(2) }}</td>
+              <td>${{ (bot.latestPrices[pos.symbol] ?? pos.current_price).toFixed(2) }}</td>
+              <td :class="pos.unrealized_pnl >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'">
+                {{ pos.unrealized_pnl >= 0 ? '+' : '' }}{{ pos.unrealized_pnl.toFixed(2) }}
+              </td>
+              <td class="text-(--color-text-secondary)">
+                {{ pos.stop_loss?.toFixed(2) ?? '-' }} / {{ pos.take_profit?.toFixed(2) ?? '-' }}
+              </td>
+            </tr>
+            <tr v-if="!bot.positions.length">
+              <td colspan="6" class="py-4 text-center text-(--color-text-secondary)">尚無持倉</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Mobile cards -->
+      <div class="md:hidden space-y-3">
+        <div v-for="pos in bot.positions" :key="pos.symbol"
+             class="bg-(--color-bg-secondary) rounded-lg p-3">
+          <div class="flex justify-between items-center mb-2">
+            <span class="font-bold">{{ pos.symbol }}</span>
+            <span :class="pos.unrealized_pnl >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'" class="font-bold">
+              {{ pos.unrealized_pnl >= 0 ? '+' : '' }}{{ pos.unrealized_pnl.toFixed(2) }} USDT
+            </span>
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-xs text-(--color-text-secondary)">
+            <div>數量: {{ pos.quantity.toFixed(6) }}</div>
+            <div>進場: ${{ pos.entry_price.toFixed(2) }}</div>
+            <div>現價: ${{ (bot.latestPrices[pos.symbol] ?? pos.current_price).toFixed(2) }}</div>
+            <div>SL/TP: {{ pos.stop_loss?.toFixed(0) ?? '-' }} / {{ pos.take_profit?.toFixed(0) ?? '-' }}</div>
+          </div>
+        </div>
+        <div v-if="!bot.positions.length" class="text-center text-sm text-(--color-text-secondary) py-4">
+          尚無持倉
+        </div>
+      </div>
     </div>
   </div>
 </template>

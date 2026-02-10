@@ -5,7 +5,6 @@ import type { LoanHealth } from '@/types'
 
 const { rows: loanHistory, loading } = useRealtimeTable<LoanHealth>('loan_health', { limit: 100 })
 
-// Group by collateral_coin to show latest per pair
 const latestPerPair = computed(() => {
   const map = new Map<string, LoanHealth>()
   for (const l of loanHistory.value) {
@@ -32,20 +31,24 @@ function ltvBgColor(ltv: number) {
 function formatTime(ts: string) {
   return new Date(ts).toLocaleString('zh-TW')
 }
+
+function formatTimeShort(ts: string) {
+  return new Date(ts).toLocaleString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
 </script>
 
 <template>
-  <div class="p-6 space-y-6">
-    <h2 class="text-2xl font-bold">借貸監控</h2>
+  <div class="p-4 md:p-6 space-y-4 md:space-y-6">
+    <h2 class="text-xl md:text-2xl font-bold">借貸監控</h2>
 
     <!-- Current LTV Gauges -->
-    <div class="grid grid-cols-4 gap-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
       <div v-for="l in latestPerPair" :key="`${l.collateral_coin}/${l.loan_coin}`"
-           class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4">
+           class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4">
         <div class="text-xs text-(--color-text-secondary) uppercase">
           {{ l.collateral_coin }} / {{ l.loan_coin }}
         </div>
-        <div class="text-3xl font-bold mt-2" :class="ltvColor(l.ltv)">
+        <div class="text-2xl md:text-3xl font-bold mt-2" :class="ltvColor(l.ltv)">
           {{ (l.ltv * 100).toFixed(1) }}%
         </div>
         <!-- LTV bar -->
@@ -56,63 +59,90 @@ function formatTime(ts: string) {
             :style="{ width: `${Math.min(l.ltv * 100, 100)}%` }"
           />
         </div>
-        <div class="flex justify-between text-xs text-(--color-text-secondary) mt-1">
+        <div class="flex justify-between text-[10px] text-(--color-text-secondary) mt-1">
           <span>0%</span>
-          <span>40% low</span>
-          <span>65% target</span>
-          <span>75% danger</span>
+          <span>40%</span>
+          <span>65%</span>
+          <span>75%</span>
         </div>
-        <div class="mt-3 text-xs text-(--color-text-secondary) space-y-1">
+        <div class="mt-2 text-xs text-(--color-text-secondary) space-y-0.5">
           <div>負債: {{ l.total_debt.toFixed(2) }} {{ l.loan_coin }}</div>
-          <div>質押物: {{ l.collateral_amount.toFixed(8) }} {{ l.collateral_coin }}</div>
+          <div>質押: {{ l.collateral_amount.toFixed(4) }} {{ l.collateral_coin }}</div>
           <div v-if="l.action_taken !== 'none'" class="font-medium"
                :class="l.action_taken === 'protect' ? 'text-(--color-warning)' : 'text-(--color-success)'">
-            操作: {{ l.action_taken === 'safe' ? '安全' : l.action_taken === 'protect' ? '保護' : l.action_taken === 'take_profit' ? '獲利了結' : l.action_taken }}
+            {{ l.action_taken === 'protect' ? '保護' : l.action_taken === 'take_profit' ? '獲利了結' : l.action_taken }}
           </div>
         </div>
       </div>
     </div>
 
-    <!-- History Table -->
+    <!-- History: desktop table, mobile cards -->
     <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl overflow-hidden">
       <h3 class="text-sm font-semibold text-(--color-text-secondary) uppercase px-4 py-3 bg-(--color-bg-secondary)">
         LTV 歷史
       </h3>
-      <table class="w-full text-sm">
-        <thead>
-          <tr class="text-(--color-text-secondary) text-left border-b border-(--color-border)">
-            <th class="px-4 py-2">時間</th>
-            <th class="px-4 py-2">交易對</th>
-            <th class="px-4 py-2">LTV</th>
-            <th class="px-4 py-2">負債</th>
-            <th class="px-4 py-2">質押物</th>
-            <th class="px-4 py-2">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-if="loading">
-            <td colspan="6" class="px-4 py-8 text-center text-(--color-text-secondary)">載入中...</td>
-          </tr>
-          <tr v-for="l in loanHistory" :key="l.id" class="border-t border-(--color-border) hover:bg-(--color-bg-secondary)/50">
-            <td class="px-4 py-2 text-(--color-text-secondary)">{{ formatTime(l.created_at) }}</td>
-            <td class="px-4 py-2">{{ l.collateral_coin }}/{{ l.loan_coin }}</td>
-            <td class="px-4 py-2 font-medium" :class="ltvColor(l.ltv)">{{ (l.ltv * 100).toFixed(1) }}%</td>
-            <td class="px-4 py-2">{{ l.total_debt.toFixed(2) }}</td>
-            <td class="px-4 py-2">{{ l.collateral_amount.toFixed(8) }}</td>
-            <td class="px-4 py-2">
-              <span v-if="l.action_taken !== 'none'"
-                    class="px-2 py-0.5 rounded text-xs"
-                    :class="{
-                      'bg-(--color-warning)/20 text-(--color-warning)': l.action_taken === 'protect',
-                      'bg-(--color-success)/20 text-(--color-success)': l.action_taken === 'take_profit',
-                    }">
-                {{ l.action_taken === 'safe' ? '安全' : l.action_taken === 'protect' ? '保護' : l.action_taken === 'take_profit' ? '獲利了結' : l.action_taken }}
-              </span>
-              <span v-else class="text-(--color-text-secondary)">-</span>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+
+      <!-- Desktop table -->
+      <div class="hidden md:block">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-(--color-text-secondary) text-left border-b border-(--color-border)">
+              <th class="px-4 py-2">時間</th>
+              <th class="px-4 py-2">交易對</th>
+              <th class="px-4 py-2">LTV</th>
+              <th class="px-4 py-2">負債</th>
+              <th class="px-4 py-2">質押物</th>
+              <th class="px-4 py-2">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="loading">
+              <td colspan="6" class="px-4 py-8 text-center text-(--color-text-secondary)">載入中...</td>
+            </tr>
+            <tr v-for="l in loanHistory" :key="l.id" class="border-t border-(--color-border) hover:bg-(--color-bg-secondary)/50">
+              <td class="px-4 py-2 text-(--color-text-secondary)">{{ formatTime(l.created_at) }}</td>
+              <td class="px-4 py-2">{{ l.collateral_coin }}/{{ l.loan_coin }}</td>
+              <td class="px-4 py-2 font-medium" :class="ltvColor(l.ltv)">{{ (l.ltv * 100).toFixed(1) }}%</td>
+              <td class="px-4 py-2">{{ l.total_debt.toFixed(2) }}</td>
+              <td class="px-4 py-2">{{ l.collateral_amount.toFixed(8) }}</td>
+              <td class="px-4 py-2">
+                <span v-if="l.action_taken !== 'none'"
+                      class="px-2 py-0.5 rounded text-xs"
+                      :class="{
+                        'bg-(--color-warning)/20 text-(--color-warning)': l.action_taken === 'protect',
+                        'bg-(--color-success)/20 text-(--color-success)': l.action_taken === 'take_profit',
+                      }">
+                  {{ l.action_taken === 'protect' ? '保護' : l.action_taken === 'take_profit' ? '獲利了結' : l.action_taken }}
+                </span>
+                <span v-else class="text-(--color-text-secondary)">-</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Mobile cards -->
+      <div class="md:hidden divide-y divide-(--color-border)">
+        <div v-if="loading" class="p-8 text-center text-sm text-(--color-text-secondary)">載入中...</div>
+        <div v-for="l in loanHistory" :key="l.id" class="p-3">
+          <div class="flex justify-between items-center">
+            <span class="text-sm font-medium">{{ l.collateral_coin }}/{{ l.loan_coin }}</span>
+            <span class="font-bold" :class="ltvColor(l.ltv)">{{ (l.ltv * 100).toFixed(1) }}%</span>
+          </div>
+          <div class="flex justify-between items-center mt-1 text-xs text-(--color-text-secondary)">
+            <span>{{ formatTimeShort(l.created_at) }}</span>
+            <span v-if="l.action_taken !== 'none'"
+                  class="px-2 py-0.5 rounded"
+                  :class="{
+                    'bg-(--color-warning)/20 text-(--color-warning)': l.action_taken === 'protect',
+                    'bg-(--color-success)/20 text-(--color-success)': l.action_taken === 'take_profit',
+                  }">
+              {{ l.action_taken === 'protect' ? '保護' : '獲利了結' }}
+            </span>
+            <span v-else>-</span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>

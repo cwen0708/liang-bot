@@ -37,15 +37,15 @@ function formatTime(ts: string) {
 </script>
 
 <template>
-  <div class="p-6 space-y-4">
-    <div class="flex items-center justify-between">
-      <h2 class="text-2xl font-bold">日誌</h2>
-      <div class="flex gap-3">
+  <div class="p-4 md:p-6 space-y-4">
+    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+      <h2 class="text-xl md:text-2xl font-bold">日誌</h2>
+      <div class="flex gap-2 w-full sm:w-auto">
         <select
           v-model="filterLevel"
           class="bg-(--color-bg-card) border border-(--color-border) rounded-lg px-3 py-1.5 text-sm"
         >
-          <option value="">全部等級</option>
+          <option value="">全部</option>
           <option>ERROR</option>
           <option>WARNING</option>
           <option>INFO</option>
@@ -53,15 +53,17 @@ function formatTime(ts: string) {
         </select>
         <input
           v-model="filterText"
-          placeholder="搜尋日誌..."
-          class="bg-(--color-bg-card) border border-(--color-border) rounded-lg px-3 py-1.5 text-sm w-64"
+          placeholder="搜尋..."
+          class="bg-(--color-bg-card) border border-(--color-border) rounded-lg px-3 py-1.5 text-sm flex-1 sm:w-48"
         />
       </div>
     </div>
 
     <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl overflow-hidden">
       <div v-if="loading" class="p-8 text-center text-(--color-text-secondary)">載入中...</div>
-      <div v-else class="max-h-[calc(100vh-160px)] overflow-auto font-mono text-xs">
+
+      <!-- Desktop: horizontal log lines -->
+      <div v-else class="hidden md:block max-h-[calc(100vh-160px)] overflow-auto font-mono text-xs">
         <div
           v-for="log in filteredLogs"
           :key="log.id"
@@ -73,6 +75,24 @@ function formatTime(ts: string) {
           <span class="text-(--color-text-primary) break-all">{{ log.message }}</span>
         </div>
         <div v-if="!filteredLogs.length" class="p-8 text-center text-(--color-text-secondary)">
+          無符合條件的日誌
+        </div>
+      </div>
+
+      <!-- Mobile: stacked log entries -->
+      <div v-if="!loading" class="md:hidden max-h-[calc(100vh-200px)] overflow-auto">
+        <div
+          v-for="log in filteredLogs"
+          :key="log.id"
+          class="px-3 py-2 border-b border-(--color-border)/30"
+        >
+          <div class="flex justify-between items-center">
+            <span class="text-xs font-bold" :class="levelColor(log.level)">{{ log.level }}</span>
+            <span class="text-[10px] text-(--color-text-secondary)">{{ formatTime(log.created_at) }} &middot; {{ log.module }}</span>
+          </div>
+          <div class="text-xs text-(--color-text-primary) mt-0.5 break-all">{{ log.message }}</div>
+        </div>
+        <div v-if="!filteredLogs.length" class="p-8 text-center text-(--color-text-secondary) text-sm">
           無符合條件的日誌
         </div>
       </div>

@@ -14,19 +14,19 @@ onMounted(() => {
 })
 
 const navItems = [
-  { to: '/', label: '總覽', icon: '📊' },
-  { to: '/trading', label: '交易', icon: '📈' },
-  { to: '/orders', label: '訂單', icon: '📋' },
-  { to: '/strategy', label: '策略', icon: '🎯' },
-  { to: '/loan-guard', label: '借貸', icon: '🛡️' },
-  { to: '/config', label: '設定', icon: '⚙️' },
-  { to: '/logs', label: '日誌', icon: '📝' },
+  { to: '/', label: '總覽', icon: 'dashboard' },
+  { to: '/trading', label: '交易', icon: 'trading' },
+  { to: '/orders', label: '訂單', icon: 'orders' },
+  { to: '/strategy', label: '策略', icon: 'strategy' },
+  { to: '/loan-guard', label: '借貸', icon: 'shield' },
+  { to: '/config', label: '設定', icon: 'config' },
+  { to: '/logs', label: '日誌', icon: 'logs' },
 ]
 </script>
 
 <template>
   <div class="flex min-h-screen flex-col md:flex-row">
-    <!-- Desktop Sidebar (hidden on mobile) -->
+    <!-- Desktop Sidebar -->
     <aside class="hidden md:flex w-56 bg-(--color-bg-secondary) border-r border-(--color-border) flex-col shrink-0">
       <div class="p-4 border-b border-(--color-border)">
         <h1 class="text-lg font-bold text-(--color-accent)">Spot Bot</h1>
@@ -52,6 +52,36 @@ const navItems = [
           class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-(--color-text-secondary) hover:bg-(--color-bg-card) hover:text-(--color-text-primary) transition-colors"
           active-class="!bg-(--color-bg-card) !text-(--color-accent)"
         >
+          <svg class="w-5 h-5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <!-- Dashboard -->
+            <template v-if="item.icon === 'dashboard'">
+              <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+            </template>
+            <!-- Trading -->
+            <template v-else-if="item.icon === 'trading'">
+              <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" /><polyline points="16 7 22 7 22 13" />
+            </template>
+            <!-- Orders -->
+            <template v-else-if="item.icon === 'orders'">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" />
+            </template>
+            <!-- Strategy -->
+            <template v-else-if="item.icon === 'strategy'">
+              <circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="3" /><line x1="12" y1="2" x2="12" y2="5" /><line x1="12" y1="19" x2="12" y2="22" />
+            </template>
+            <!-- Shield -->
+            <template v-else-if="item.icon === 'shield'">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            </template>
+            <!-- Config -->
+            <template v-else-if="item.icon === 'config'">
+              <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </template>
+            <!-- Logs -->
+            <template v-else-if="item.icon === 'logs'">
+              <line x1="4" y1="6" x2="20" y2="6" /><line x1="4" y1="10" x2="20" y2="10" /><line x1="4" y1="14" x2="16" y2="14" /><line x1="4" y1="18" x2="12" y2="18" />
+            </template>
+          </svg>
           {{ item.label }}
         </RouterLink>
       </nav>
@@ -95,7 +125,29 @@ const navItems = [
           active-class="!text-(--color-accent)"
           @click="mobileMenuOpen = false"
         >
-          <span class="text-lg leading-none">{{ item.icon }}</span>
+          <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <template v-if="item.icon === 'dashboard'">
+              <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+            </template>
+            <template v-else-if="item.icon === 'trading'">
+              <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" /><polyline points="16 7 22 7 22 13" />
+            </template>
+            <template v-else-if="item.icon === 'orders'">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" />
+            </template>
+            <template v-else-if="item.icon === 'strategy'">
+              <circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="3" /><line x1="12" y1="2" x2="12" y2="5" /><line x1="12" y1="19" x2="12" y2="22" />
+            </template>
+            <template v-else-if="item.icon === 'shield'">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            </template>
+            <template v-else-if="item.icon === 'config'">
+              <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </template>
+            <template v-else-if="item.icon === 'logs'">
+              <line x1="4" y1="6" x2="20" y2="6" /><line x1="4" y1="10" x2="20" y2="10" /><line x1="4" y1="14" x2="16" y2="14" /><line x1="4" y1="18" x2="12" y2="18" />
+            </template>
+          </svg>
           <span class="text-[10px] mt-0.5 truncate w-full text-center">{{ item.label }}</span>
         </RouterLink>
       </div>

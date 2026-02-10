@@ -43,3 +43,6 @@ frontend/.env
 
 # Supabase
 supabase/.temp/
+
+# Firebase
+.firebase/

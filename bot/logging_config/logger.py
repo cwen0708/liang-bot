@@ -1,12 +1,18 @@
 """集中式日誌工廠。"""
 
+from __future__ import annotations
+
 import logging
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import colorlog
 
 from bot.config.settings import PROJECT_ROOT
+
+if TYPE_CHECKING:
+    from bot.db.supabase_client import SupabaseWriter
 
 _configured = False
 
@@ -59,3 +65,36 @@ def setup_logging(level: str = "INFO", file_enabled: bool = True, log_dir: str =
 def get_logger(name: str) -> logging.Logger:
     """取得具名 logger。使用方式: logger = get_logger(__name__)"""
     return logging.getLogger(f"bot.{name}")
+
+
+# ---------------------------------------------------------------------------
+# Supabase logging handler — 把 Python log 自動送到 bot_logs 表
+# ---------------------------------------------------------------------------
+
+class SupabaseLogHandler(logging.Handler):
+    """將日誌透過 SupabaseWriter.insert_log 寫入 bot_logs 表。"""
+
+    def __init__(self, writer: SupabaseWriter, level: int = logging.INFO) -> None:
+        super().__init__(level)
+        self._writer = writer
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            # module: 去掉 "bot." 前綴讓前端更好讀
+            module = record.name
+            if module.startswith("bot."):
+                module = module[4:]
+            self._writer.insert_log(
+                level=record.levelname,
+                module=module,
+                message=self.format(record),
+            )
+        except Exception:
+            pass  # 避免日誌寫入失敗導致遞迴錯誤
+
+
+def attach_supabase_handler(writer: SupabaseWriter, level: int = logging.INFO) -> None:
+    """建立 SupabaseLogHandler 並掛到 root bot logger。"""
+    handler = SupabaseLogHandler(writer, level=level)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger("bot").addHandler(handler)

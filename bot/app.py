@@ -18,7 +18,7 @@ from bot.execution.order_manager import OrderManager
 from bot.llm.decision_engine import LLMDecisionEngine
 from bot.llm.schemas import PortfolioState, PositionInfo
 from bot.logging_config import get_logger
-from bot.logging_config.logger import setup_logging
+from bot.logging_config.logger import attach_supabase_handler, setup_logging
 from bot.risk.manager import RiskManager
 from bot.strategy.base import BaseStrategy, OrderFlowStrategy
 from bot.strategy.router import StrategyRouter
@@ -88,6 +88,7 @@ class TradingBot:
 
         # Supabase 寫入層
         self._db = SupabaseWriter()
+        attach_supabase_handler(self._db)
 
         # 每個交易對一個 BarAggregator（跨輪保留，持續聚合）
         self._aggregators: dict[str, BarAggregator] = {}

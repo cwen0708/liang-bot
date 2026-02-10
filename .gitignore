@@ -1,0 +1,45 @@
+# Secrets
+.env
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Data files (large, regenerable)
+data/historical/
+data/logs/
+data/backtest_results/
+data/aggtrades/
+data/orderflow_cache/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# Supabase
+supabase/.temp/

@@ -1,0 +1,77 @@
+# Trading Configuration
+trading:
+  mode: "paper"              # "paper" or "live"
+  pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+  timeframe: "1h"            # K 線週期
+  check_interval_seconds: 60 # 主迴圈執行間隔（秒）
+
+# Strategy Configuration
+strategy:
+  name: "sma_crossover"
+  params:
+    fast_period: 10
+    slow_period: 30
+
+# Risk Management
+risk:
+  max_position_pct: 0.02     # 每筆交易最大部位：總資金 2%
+  stop_loss_pct: 0.03        # 停損 3%
+  take_profit_pct: 0.06      # 停利 6%（風報比 2:1）
+  max_open_positions: 3      # 最大同時持倉數
+  max_daily_loss_pct: 0.05   # 每日虧損超過 5% 暫停交易
+
+# Backtest
+backtest:
+  start_date: "2024-01-01"
+  end_date: "2025-01-01"
+  initial_balance: 10000     # USDT
+  commission_pct: 0.001      # 0.1% 幣安現貨手續費
+
+# Order Flow
+orderflow:
+  bar_interval_seconds: 60
+  tick_size: 0.01
+  cvd_lookback: 500
+  zscore_lookback: 20
+  divergence_peak_order: 5
+  sfp_swing_lookback: 5
+  absorption_lookback: 10
+  signal_threshold: 0.5
+
+# Multi-Strategy
+strategies:
+  - name: "sma_crossover"
+    params:
+      fast_period: 10
+      slow_period: 30
+  - name: "tia_orderflow"
+    params:
+      signal_threshold: 0.5
+
+# LLM Decision Engine
+llm:
+  enabled: true
+  cli_path: "claude"
+  model: "claude-sonnet-4-5-20250929"
+  timeout: 60
+  min_confidence: 0.3           # 至少一個策略信心 >= 此值才呼叫 LLM
+  fallback: "weighted_vote"
+  fallback_weights:
+    sma_crossover: 0.3
+    tia_orderflow: 0.7
+
+# Loan Guard（借貸再平衡）
+loan_guard:
+  enabled: true
+  target_ltv: 0.65            # 目標平衡 LTV
+  danger_ltv: 0.75            # 高於此 → 買入質押物（低買）
+  low_ltv: 0.40               # 低於此 → 減少質押賣出（高賣）
+  dry_run: false              # true=只告警, false=AI審核通過後實際執行
+
+# Logging
+logging:
+  level: "INFO"
+  file_enabled: true
+  log_dir: "data/logs"

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import date
 
-from bot.config.settings import RiskConfig
+from bot.config.settings import SpotConfig
 from bot.logging_config import get_logger
 from bot.risk.position_sizer import PercentageSizer
 from bot.strategy.signals import Signal
@@ -32,7 +32,7 @@ class RiskManager:
     4. 每日虧損限制
     """
 
-    def __init__(self, config: RiskConfig) -> None:
+    def __init__(self, config: SpotConfig) -> None:
         self.config = config
         self.sizer = PercentageSizer(config.max_position_pct)
         self._open_positions: dict[str, dict] = {}
@@ -44,16 +44,10 @@ class RiskManager:
         return len(self._open_positions)
 
     def evaluate(
-        self, signal: Signal, symbol: str, price: float, balance: float
+        self, signal: Signal, symbol: str, price: float, balance: float,
     ) -> RiskOutput:
-        """評估交易訊號是否通過風控。"""
+        """評估交易訊號是否通過風控。每日虧損限制只阻止買入，不阻止賣出。"""
         self._reset_daily_pnl_if_needed()
-
-        # 每日虧損限制
-        if self._daily_pnl < -(balance * self.config.max_daily_loss_pct):
-            reason = f"已達每日虧損限制 ({self.config.max_daily_loss_pct * 100:.1f}%)"
-            logger.warning(reason)
-            return RiskOutput(approved=False, reason=reason)
 
         if signal == Signal.BUY:
             return self._evaluate_buy(symbol, price, balance)
@@ -63,6 +57,12 @@ class RiskManager:
             return RiskOutput(approved=False, reason="HOLD 訊號")
 
     def _evaluate_buy(self, symbol: str, price: float, balance: float) -> RiskOutput:
+        # 每日虧損限制（只阻止開新倉，不阻止賣出）
+        if self._daily_pnl < -(balance * self.config.max_daily_loss_pct):
+            reason = f"已達每日虧損限制 ({self.config.max_daily_loss_pct * 100:.1f}%)"
+            logger.warning(reason)
+            return RiskOutput(approved=False, reason=reason)
+
         # 最大持倉數
         if self.open_position_count >= self.config.max_open_positions:
             reason = f"已達最大持倉數 ({self.config.max_open_positions})"

@@ -21,11 +21,17 @@ class ExchangeConfig:
 
 
 @dataclass(frozen=True)
-class TradingConfig:
+class SpotConfig:
+    """現貨交易配置（合併交易參數與風控參數）。"""
     mode: TradingMode = TradingMode.PAPER
     pairs: tuple[str, ...] = ("BTC/USDT",)
     timeframe: str = "1h"
     check_interval_seconds: int = 60
+    max_position_pct: float = 0.02
+    stop_loss_pct: float = 0.03
+    take_profit_pct: float = 0.06
+    max_open_positions: int = 3
+    max_daily_loss_pct: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -34,13 +40,9 @@ class StrategyConfig:
     params: dict = field(default_factory=lambda: {"fast_period": 10, "slow_period": 30})
 
 
-@dataclass(frozen=True)
-class RiskConfig:
-    max_position_pct: float = 0.02
-    stop_loss_pct: float = 0.03
-    take_profit_pct: float = 0.06
-    max_open_positions: int = 3
-    max_daily_loss_pct: float = 0.05
+# 向後相容別名
+TradingConfig = SpotConfig
+RiskConfig = SpotConfig
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,39 @@ class LoanGuardConfig:
 
 
 @dataclass(frozen=True)
+class AtrConfig:
+    """ATR 動態停損停利配置。"""
+    period: int = 14
+    sl_multiplier: float = 1.5
+    tp_multiplier: float = 3.0
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class FuturesConfig:
+    """USDT-M 永續合約配置。"""
+    enabled: bool = False
+    pairs: tuple[str, ...] = ()
+    leverage: int = 3
+    margin_type: str = "cross"
+    max_leverage: int = 5
+    timeframe: str = "1h"
+    check_interval_seconds: int = 60
+    mode: TradingMode = TradingMode.PAPER
+    max_position_pct: float = 0.02
+    stop_loss_pct: float = 0.02
+    take_profit_pct: float = 0.04
+    max_open_positions: int = 3
+    max_daily_loss_pct: float = 0.05
+    max_margin_ratio: float = 0.80
+    funding_rate_threshold: float = 0.001
+    min_risk_reward: float = 1.5
+    atr: AtrConfig = field(default_factory=AtrConfig)
+    strategies: list = field(default_factory=list)
+    min_confidence: float = 0.3
+
+
+@dataclass(frozen=True)
 class StrategiesConfig:
     """多策略配置。每個策略可設 interval_n 控制執行頻率。"""
     strategies: list[dict] = field(default_factory=lambda: [
@@ -102,15 +137,24 @@ class StrategiesConfig:
 @dataclass(frozen=True)
 class Settings:
     exchange: ExchangeConfig
-    trading: TradingConfig
+    spot: SpotConfig
     strategy: StrategyConfig
-    risk: RiskConfig
     backtest: BacktestConfig
     logging: LoggingConfig
     orderflow: OrderFlowConfig = field(default_factory=OrderFlowConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     strategies_config: StrategiesConfig = field(default_factory=StrategiesConfig)
     loan_guard: LoanGuardConfig = field(default_factory=LoanGuardConfig)
+    futures: FuturesConfig = field(default_factory=FuturesConfig)
+
+    # 向後相容屬性
+    @property
+    def trading(self) -> SpotConfig:
+        return self.spot
+
+    @property
+    def risk(self) -> SpotConfig:
+        return self.spot
 
     def __repr__(self) -> str:
         return (
@@ -123,15 +167,15 @@ class Settings:
         """從 dict（Supabase config_json）建立新 Settings，保留 exchange 不變。"""
         return cls(
             exchange=current.exchange,  # API 金鑰不從 DB 載入
-            trading=cls._load_trading(cfg.get("trading", {})),
+            spot=cls._load_spot(cfg),
             strategy=cls._load_strategy(cfg.get("strategy", {})),
-            risk=cls._load_risk(cfg.get("risk", {})),
             backtest=current.backtest,
             logging=cls._load_logging(cfg.get("logging", {})),
             orderflow=cls._load_orderflow(cfg.get("orderflow", {})),
             llm=cls._load_llm(cfg.get("llm", {})),
             strategies_config=cls._load_strategies_config(cfg.get("strategies", [])),
             loan_guard=cls._load_loan_guard(cfg.get("loan_guard", {})),
+            futures=cls._load_futures(cfg.get("futures", {})),
         )
 
     @classmethod
@@ -147,27 +191,27 @@ class Settings:
             cfg = yaml.safe_load(f) or {}
 
         exchange = cls._load_exchange()
-        trading = cls._load_trading(cfg.get("trading", {}))
+        spot = cls._load_spot(cfg)
         strategy = cls._load_strategy(cfg.get("strategy", {}))
-        risk = cls._load_risk(cfg.get("risk", {}))
         backtest = cls._load_backtest(cfg.get("backtest", {}))
         logging_cfg = cls._load_logging(cfg.get("logging", {}))
         orderflow = cls._load_orderflow(cfg.get("orderflow", {}))
         llm = cls._load_llm(cfg.get("llm", {}))
         strategies_config = cls._load_strategies_config(cfg.get("strategies", []))
         loan_guard = cls._load_loan_guard(cfg.get("loan_guard", {}))
+        futures = cls._load_futures(cfg.get("futures", {}))
 
         return cls(
             exchange=exchange,
-            trading=trading,
+            spot=spot,
             strategy=strategy,
-            risk=risk,
             backtest=backtest,
             logging=logging_cfg,
             orderflow=orderflow,
             llm=llm,
             strategies_config=strategies_config,
             loan_guard=loan_guard,
+            futures=futures,
         )
 
     @staticmethod
@@ -185,19 +229,33 @@ class Settings:
         return ExchangeConfig(api_key=api_key, api_secret=api_secret, testnet=testnet)
 
     @staticmethod
-    def _load_trading(cfg: dict) -> TradingConfig:
-        mode = TradingMode(cfg.get("mode", "paper"))
-        pairs = tuple(cfg.get("pairs", ["BTC/USDT"]))
-        timeframe = cfg.get("timeframe", "1h")
+    def _load_spot(cfg: dict) -> SpotConfig:
+        """支援新格式 (spot) 和舊格式 (trading+risk) 向後相容。"""
+        spot = cfg.get("spot", {})
+        if spot:
+            src = spot
+        else:
+            # 向後相容：合併 trading + risk
+            trading = cfg.get("trading", {})
+            risk = cfg.get("risk", {})
+            src = {**trading, **risk}
+
+        mode = TradingMode(src.get("mode", "paper"))
+        timeframe = src.get("timeframe", "1h")
 
         if timeframe not in VALID_TIMEFRAMES:
             raise ValueError(f"不支援的時間框架: {timeframe}，有效值: {VALID_TIMEFRAMES}")
 
-        return TradingConfig(
+        return SpotConfig(
             mode=mode,
-            pairs=pairs,
+            pairs=tuple(src.get("pairs", ["BTC/USDT"])),
             timeframe=timeframe,
-            check_interval_seconds=cfg.get("check_interval_seconds", 60),
+            check_interval_seconds=src.get("check_interval_seconds", 60),
+            max_position_pct=src.get("max_position_pct", 0.02),
+            stop_loss_pct=src.get("stop_loss_pct", 0.03),
+            take_profit_pct=src.get("take_profit_pct", 0.06),
+            max_open_positions=src.get("max_open_positions", 3),
+            max_daily_loss_pct=src.get("max_daily_loss_pct", 0.05),
         )
 
     @staticmethod
@@ -205,16 +263,6 @@ class Settings:
         return StrategyConfig(
             name=cfg.get("name", "sma_crossover"),
             params=cfg.get("params", {"fast_period": 10, "slow_period": 30}),
-        )
-
-    @staticmethod
-    def _load_risk(cfg: dict) -> RiskConfig:
-        return RiskConfig(
-            max_position_pct=cfg.get("max_position_pct", 0.02),
-            stop_loss_pct=cfg.get("stop_loss_pct", 0.03),
-            take_profit_pct=cfg.get("take_profit_pct", 0.06),
-            max_open_positions=cfg.get("max_open_positions", 3),
-            max_daily_loss_pct=cfg.get("max_daily_loss_pct", 0.05),
         )
 
     @staticmethod
@@ -271,4 +319,50 @@ class Settings:
             danger_ltv=cfg.get("danger_ltv", 0.75),
             low_ltv=cfg.get("low_ltv", 0.40),
             dry_run=cfg.get("dry_run", True),
+        )
+
+    @staticmethod
+    def _load_futures(cfg: dict) -> "FuturesConfig":
+        if not cfg:
+            return FuturesConfig()
+        leverage = min(cfg.get("leverage", 3), cfg.get("max_leverage", 5))
+
+        # ATR 配置：支援巢狀 atr.* 和舊版平鋪格式
+        atr_cfg = cfg.get("atr", {})
+        if atr_cfg and isinstance(atr_cfg, dict):
+            atr = AtrConfig(
+                period=atr_cfg.get("period", 14),
+                sl_multiplier=atr_cfg.get("sl_multiplier", 1.5),
+                tp_multiplier=atr_cfg.get("tp_multiplier", 3.0),
+                enabled=atr_cfg.get("enabled", True),
+            )
+        else:
+            # 向後相容：舊版平鋪 atr_period 等
+            atr = AtrConfig(
+                period=cfg.get("atr_period", 14),
+                sl_multiplier=cfg.get("atr_sl_multiplier", 1.5),
+                tp_multiplier=cfg.get("atr_tp_multiplier", 3.0),
+                enabled=cfg.get("use_atr_stops", True),
+            )
+
+        return FuturesConfig(
+            enabled=cfg.get("enabled", False),
+            pairs=tuple(cfg.get("pairs", [])),
+            leverage=leverage,
+            margin_type=cfg.get("margin_type", "cross"),
+            max_leverage=cfg.get("max_leverage", 5),
+            timeframe=cfg.get("timeframe", "1h"),
+            check_interval_seconds=cfg.get("check_interval_seconds", 60),
+            mode=TradingMode(cfg.get("mode", "paper")),
+            max_position_pct=cfg.get("max_position_pct", 0.02),
+            stop_loss_pct=cfg.get("stop_loss_pct", 0.02),
+            take_profit_pct=cfg.get("take_profit_pct", 0.04),
+            max_open_positions=cfg.get("max_open_positions", 3),
+            max_daily_loss_pct=cfg.get("max_daily_loss_pct", 0.05),
+            max_margin_ratio=cfg.get("max_margin_ratio", 0.80),
+            funding_rate_threshold=cfg.get("funding_rate_threshold", 0.001),
+            min_risk_reward=cfg.get("min_risk_reward", 1.5),
+            atr=atr,
+            strategies=cfg.get("strategies", []),
+            min_confidence=cfg.get("min_confidence", 0.3),
         )

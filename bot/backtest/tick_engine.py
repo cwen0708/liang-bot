@@ -6,7 +6,7 @@ from pathlib import Path
 
 from bot.backtest.metrics import BacktestMetrics, calculate_metrics
 from bot.backtest.simulator import BacktestSimulator
-from bot.config.settings import BacktestConfig, OrderFlowConfig, RiskConfig
+from bot.config.settings import BacktestConfig, OrderFlowConfig, SpotConfig
 from bot.data.bar_aggregator import BarAggregator
 from bot.data.models import AggTrade
 from bot.logging_config import get_logger
@@ -30,7 +30,7 @@ class TickBacktestEngine:
     def __init__(
         self,
         config: BacktestConfig,
-        risk_config: RiskConfig,
+        risk_config: SpotConfig,
         orderflow_config: OrderFlowConfig,
     ) -> None:
         self.config = config

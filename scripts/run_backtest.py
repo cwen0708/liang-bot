@@ -33,7 +33,7 @@ def main() -> None:
     print(f"下載 {args.symbol} 歷史數據...")
     df = fetcher.fetch_historical(
         symbol=args.symbol,
-        timeframe=settings.trading.timeframe,
+        timeframe=settings.spot.timeframe,
         start_date=settings.backtest.start_date,
         end_date=settings.backtest.end_date,
     )
@@ -41,7 +41,7 @@ def main() -> None:
 
     # 建立策略與回測引擎
     strategy = SMACrossoverStrategy(settings.strategy.params)
-    engine = BacktestEngine(settings.backtest, settings.risk)
+    engine = BacktestEngine(settings.backtest, settings.spot)
 
     # 執行回測
     metrics = engine.run(strategy, df, args.symbol)

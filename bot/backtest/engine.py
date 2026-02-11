@@ -8,7 +8,7 @@ import pandas as pd
 
 from bot.backtest.metrics import BacktestMetrics, calculate_metrics
 from bot.backtest.simulator import BacktestSimulator
-from bot.config.settings import BacktestConfig, RiskConfig
+from bot.config.settings import BacktestConfig, SpotConfig
 from bot.logging_config import get_logger
 from bot.risk.position_sizer import PercentageSizer
 from bot.strategy.base import BaseStrategy, OrderFlowStrategy
@@ -20,7 +20,7 @@ logger = get_logger("backtest.engine")
 class BacktestEngine:
     """回測引擎。"""
 
-    def __init__(self, config: BacktestConfig, risk_config: RiskConfig) -> None:
+    def __init__(self, config: BacktestConfig, risk_config: SpotConfig) -> None:
         self.config = config
         self.risk_config = risk_config
 

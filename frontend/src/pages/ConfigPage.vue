@@ -15,19 +15,17 @@ interface SchemaEntry {
 }
 
 const DEFAULT_SCHEMA: Record<string, SchemaEntry> = {
-  // Trading
-  'trading':                          { label: '交易設定', desc: '核心交易參數，包含模式、交易對與 K 線週期設定' },
-  'trading.mode':                     { label: '交易模式', type: 'select', options: ['paper', 'live'], desc: 'paper = 模擬交易（不實際下單），live = 真實交易。切換前請確認資金與策略已就緒' },
-  'trading.pairs':                    { label: '交易對', type: 'tags', desc: 'Bot 監控的幣安現貨交易對清單，格式為 BTC/USDT。每輪 cycle 會依序掃描所有交易對' },
-  'trading.timeframe':                { label: 'K 線週期', type: 'select', options: ['1m', '5m', '15m', '30m', '1h', '4h', '1d'], desc: '策略分析使用的 K 線時間框架。較短週期信號多但雜訊大，較長週期信號穩但反應慢' },
-  'trading.check_interval_seconds':   { label: '檢查間隔', type: 'integer', desc: '每輪交易循環之間的等待秒數。過短會增加 API 請求頻率，過長可能錯過進場時機' },
-  // Risk
-  'risk':                             { label: '風險管理', desc: '控制每筆交易的風險敞口、停損停利與每日虧損上限' },
-  'risk.max_position_pct':            { label: '最大部位', type: 'percent', step: 0.01, desc: '單筆交易最多使用可用餘額的百分比。例如 10% 表示每筆最多投入總資金的 10%' },
-  'risk.stop_loss_pct':               { label: '停損', type: 'percent', step: 0.01, desc: '持倉虧損達此百分比時自動賣出止損。例如 3% 表示虧損超過買入價的 3% 即觸發停損' },
-  'risk.take_profit_pct':             { label: '停利', type: 'percent', step: 0.01, desc: '持倉獲利達此百分比時自動賣出止盈。例如 6% 表示獲利超過買入價的 6% 即觸發停利' },
-  'risk.max_open_positions':          { label: '最大持倉數', type: 'integer', desc: '同時持有的最大倉位數量。超過此數量時不會開新倉，避免過度分散資金' },
-  'risk.max_daily_loss_pct':          { label: '每日虧損上限', type: 'percent', step: 0.01, desc: '當日累計虧損達此百分比時，Bot 停止開新倉直到隔日。防止單日過度損失' },
+  // Spot（現貨交易 + 風控）
+  'spot':                             { label: '現貨交易', desc: '現貨交易參數與風控設定（合併交易與風險管理）' },
+  'spot.mode':                        { label: '交易模式', type: 'select', options: ['paper', 'live'], desc: 'paper = 模擬交易（不實際下單），live = 真實交易。切換前請確認資金與策略已就緒' },
+  'spot.pairs':                       { label: '交易對', type: 'tags', desc: 'Bot 監控的幣安現貨交易對清單，格式為 BTC/USDT。每輪 cycle 會依序掃描所有交易對' },
+  'spot.timeframe':                   { label: 'K 線週期', type: 'select', options: ['1m', '5m', '15m', '30m', '1h', '4h', '1d'], desc: '策略分析使用的 K 線時間框架。較短週期信號多但雜訊大，較長週期信號穩但反應慢' },
+  'spot.check_interval_seconds':      { label: '檢查間隔', type: 'integer', desc: '每輪交易循環之間的等待秒數。過短會增加 API 請求頻率，過長可能錯過進場時機' },
+  'spot.max_position_pct':            { label: '最大部位', type: 'percent', step: 0.01, desc: '單筆交易最多使用可用餘額的百分比。例如 10% 表示每筆最多投入總資金的 10%' },
+  'spot.stop_loss_pct':               { label: '停損', type: 'percent', step: 0.01, desc: '持倉虧損達此百分比時自動賣出止損。例如 3% 表示虧損超過買入價的 3% 即觸發停損' },
+  'spot.take_profit_pct':             { label: '停利', type: 'percent', step: 0.01, desc: '持倉獲利達此百分比時自動賣出止盈。例如 6% 表示獲利超過買入價的 6% 即觸發停利' },
+  'spot.max_open_positions':          { label: '最大持倉數', type: 'integer', desc: '同時持有的最大倉位數量。超過此數量時不會開新倉，避免過度分散資金' },
+  'spot.max_daily_loss_pct':          { label: '每日虧損上限', type: 'percent', step: 0.01, desc: '當日累計虧損達此百分比時，Bot 停止開新倉直到隔日。防止單日過度損失' },
   // Backtest
   'backtest':                         { label: '回測設定', desc: '歷史回測引擎的參數，用於驗證策略在過往數據上的表現' },
   'backtest.start_date':              { label: '起始日期', type: 'string', desc: '回測的開始日期，格式 YYYY-MM-DD' },
@@ -60,6 +58,31 @@ const DEFAULT_SCHEMA: Record<string, SchemaEntry> = {
   'loan_guard.danger_ltv':            { label: '危險 LTV', type: 'percent', step: 0.01, desc: 'LTV 達此值時觸發緊急保護：自動買入並質押（低買策略），防止被強制清算' },
   'loan_guard.low_ltv':               { label: '低 LTV', type: 'percent', step: 0.01, desc: 'LTV 低於此值時觸發獲利：自動減質押並賣出（高賣策略），釋放多餘抵押品' },
   'loan_guard.dry_run':               { label: '模擬模式', type: 'boolean', desc: '開啟後只記錄操作意圖但不實際執行交易，用於測試 LTV 判斷邏輯是否正確' },
+  // Futures
+  'futures':                              { label: '合約交易', desc: 'USDT-M 永續合約交易模組。獨立於現貨，有專屬的交易對、槓桿、風控參數' },
+  'futures.enabled':                      { label: '啟用合約', type: 'boolean', desc: '開啟合約交易模組。啟用後 Bot 會在每輪 cycle 額外處理合約交易對' },
+  'futures.mode':                         { label: '交易模式', type: 'select', options: ['paper', 'live'], desc: 'paper = 模擬交易（不實際下單），live = 真實合約交易。合約風險較高，建議先用 paper 模式測試' },
+  'futures.pairs':                        { label: '合約交易對', type: 'tags', desc: '合約交易對清單，格式為 BTC/USDT:USDT（ccxt swap 格式）' },
+  'futures.leverage':                     { label: '槓桿倍數', type: 'integer', desc: '預設槓桿倍數。會被 max_leverage 上限限制。例如 3 表示 3 倍槓桿' },
+  'futures.max_leverage':                 { label: '最大槓桿', type: 'integer', desc: '允許的最大槓桿倍數上限，防止意外設定過高槓桿' },
+  'futures.margin_type':                  { label: '保證金模式', type: 'select', options: ['cross', 'isolated'], desc: 'cross = 全倉（共用保證金），isolated = 逐倉（每個倉位獨立保證金）' },
+  'futures.timeframe':                    { label: 'K 線週期', type: 'select', options: ['1m', '5m', '15m', '30m', '1h', '4h', '1d'], desc: '合約策略分析使用的 K 線週期，可與現貨使用不同週期' },
+  'futures.check_interval_seconds':       { label: '檢查間隔', type: 'integer', desc: '合約交易循環的等待秒數' },
+  'futures.max_position_pct':             { label: '最大部位', type: 'percent', step: 0.01, desc: '單筆合約交易最多使用可用保證金的百分比。注意：實際名義價值 = 保證金 × 此比例 × 槓桿' },
+  'futures.stop_loss_pct':                { label: '停損（固定）', type: 'percent', step: 0.01, desc: '固定百分比停損。當 use_atr_stops=true 時僅作為 ATR 數據不足時的 fallback' },
+  'futures.take_profit_pct':              { label: '停利（固定）', type: 'percent', step: 0.01, desc: '固定百分比停利。當 use_atr_stops=true 時僅作為 ATR 數據不足時的 fallback' },
+  'futures.max_open_positions':           { label: '最大持倉數', type: 'integer', desc: '合約同時持有的最大倉位數量（多倉+空倉合計）' },
+  'futures.max_daily_loss_pct':           { label: '每日虧損上限', type: 'percent', step: 0.01, desc: '合約當日累計虧損達此比例時停止開新倉。單筆交易帳戶風險不超過此值的一半' },
+  'futures.max_margin_ratio':             { label: '保證金比率警戒', type: 'percent', step: 0.01, desc: '帳戶保證金比率超過此值時拒絕開新倉，防止觸發強制清算' },
+  'futures.funding_rate_threshold':       { label: '資金費率閾值', type: 'number', step: 0.001, desc: '資金費率超過此值時作為風險信號。正值表示多頭付空頭，負值反之' },
+  'futures.min_risk_reward':              { label: '最低盈虧比', type: 'number', step: 0.1, desc: '開倉前的盈虧比 (R:R) 最低門檻。例如 1.5 表示潛在獲利必須是潛在虧損的 1.5 倍以上才開倉' },
+  'futures.atr':                          { label: 'ATR 動態停損', desc: 'ATR（平均真實波幅）動態停損停利配置' },
+  'futures.atr.period':                   { label: '計算週期', type: 'integer', desc: 'ATR 計算的 K 線回看週期。用於動態計算停損停利距離' },
+  'futures.atr.sl_multiplier':            { label: '停損倍率', type: 'number', step: 0.1, desc: '停損距離 = ATR × 此倍率。例如 1.5 表示停損設在 1.5 倍 ATR 距離' },
+  'futures.atr.tp_multiplier':            { label: '停利倍率', type: 'number', step: 0.1, desc: '停利距離 = ATR × 此倍率。與停損倍率的比值決定盈虧比（例如 3.0/1.5=2.0）' },
+  'futures.atr.enabled':                  { label: '啟用動態 SL/TP', type: 'boolean', desc: '啟用 ATR 動態停損停利。關閉則使用固定百分比。建議開啟以適應不同市場波動度' },
+  'futures.strategies':                   { label: '合約策略清單', desc: '合約專屬策略清單，為空則共用現貨策略' },
+  'futures.min_confidence':               { label: 'LLM 信心門檻', type: 'number', step: 0.1, desc: '合約 LLM 決策的最低信心分數（0-1）。低於此值降級為 HOLD' },
   // Logging
   'logging':                          { label: '日誌設定', desc: 'Bot 日誌輸出的等級與儲存方式' },
   'logging.level':                    { label: '日誌等級', type: 'select', options: ['DEBUG', 'INFO', 'WARNING', 'ERROR'], desc: 'DEBUG = 所有細節，INFO = 一般運行，WARNING = 警告，ERROR = 僅錯誤。生產環境建議 INFO' },
@@ -319,7 +342,7 @@ function flattenConfig(
     : Object.entries(obj as Record<string, unknown>)
 
   // Hidden top-level keys (legacy, still in JSON but not shown in UI)
-  const HIDDEN_KEYS = new Set(['strategy'])
+  const HIDDEN_KEYS = new Set(['strategy', 'trading', 'risk'])
 
   for (const [key, value] of entries) {
     const path = parentPath ? `${parentPath}.${key}` : key

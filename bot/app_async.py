@@ -39,11 +39,11 @@ class AsyncTradingBot:
             log_dir=self.settings.logging.log_dir,
         )
 
-        logger.info("初始化非同步交易機器人 (模式=%s)", self.settings.trading.mode)
+        logger.info("初始化非同步交易機器人 (模式=%s)", self.settings.spot.mode)
 
         self.exchange = BinanceClient(self.settings.exchange)
-        self.risk_manager = RiskManager(self.settings.risk)
-        self.executor = OrderExecutor(self.exchange, self.settings.trading.mode)
+        self.risk_manager = RiskManager(self.settings.spot)
+        self.executor = OrderExecutor(self.exchange, self.settings.spot.mode)
         self.order_manager = OrderManager()
 
         # 訂單流策略
@@ -60,16 +60,14 @@ class AsyncTradingBot:
         self.of_strategy = TiaBTCOrderFlowStrategy(of_params)
 
         # 策略路由器
-        self.router = StrategyRouter(
-            fallback_weights=self.settings.llm.fallback_weights,
-        )
+        self.router = StrategyRouter()
 
         # LLM 決策引擎
         self.llm_engine = LLMDecisionEngine(self.settings.llm)
 
         # 每個交易對一個 BarAggregator
         self._aggregators: dict[str, BarAggregator] = {}
-        for pair in self.settings.trading.pairs:
+        for pair in self.settings.spot.pairs:
             ws_symbol = pair.replace("/", "")
             self._aggregators[ws_symbol] = BarAggregator(
                 interval_seconds=self.settings.orderflow.bar_interval_seconds,
@@ -91,7 +89,7 @@ class AsyncTradingBot:
                 # Windows 不支援 add_signal_handler
                 pass
 
-        ws_symbols = [pair.replace("/", "") for pair in self.settings.trading.pairs]
+        ws_symbols = [pair.replace("/", "") for pair in self.settings.spot.pairs]
 
         stream = BinanceAggTradeStream(
             symbols=ws_symbols,
@@ -116,7 +114,7 @@ class AsyncTradingBot:
         """處理每筆 aggTrade。"""
         # 從交易對推斷 symbol（假設格式如 BTCUSDT）
         # 反向對照 settings.trading.pairs
-        for pair in self.settings.trading.pairs:
+        for pair in self.settings.spot.pairs:
             ws_symbol = pair.replace("/", "")
             if ws_symbol in self._aggregators:
                 aggregator = self._aggregators[ws_symbol]
@@ -203,7 +201,7 @@ class AsyncTradingBot:
         return PortfolioState(
             available_balance=usdt_balance,
             positions=positions,
-            max_positions=self.settings.risk.max_open_positions,
+            max_positions=self.settings.spot.max_open_positions,
             current_position_count=self.risk_manager.open_position_count,
         )
 

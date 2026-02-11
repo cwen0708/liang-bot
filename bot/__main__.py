@@ -47,6 +47,9 @@ def main() -> None:
     lg_parser.add_argument("--interval", type=int, default=60, help="檢查間隔秒數 (預設 60)")
     lg_parser.add_argument("--dry-run", action="store_true", help="模擬模式，不實際執行")
 
+    # futures-balance
+    subparsers.add_parser("futures-balance", help="查詢合約帳戶餘額")
+
     # validate
     subparsers.add_parser("validate", help="驗證配置")
 
@@ -73,6 +76,8 @@ def main() -> None:
         cmd_loan()
     elif args.command == "loan-guard":
         cmd_loan_guard(args)
+    elif args.command == "futures-balance":
+        cmd_futures_balance()
     elif args.command == "validate":
         cmd_validate()
     elif args.command == "config-push":
@@ -80,10 +85,86 @@ def main() -> None:
 
 
 def cmd_run(args) -> None:
+    _kill_existing_bot()
+
     from bot.app import TradingBot
 
     bot = TradingBot(config_path=args.config)
     bot.run()
+
+
+def _kill_existing_bot() -> None:
+    """啟動前自動關閉已在運行的 Bot 進程（讓 run 等同於 restart）。"""
+    import os
+
+    try:
+        import psutil
+    except ImportError:
+        return
+
+    my_pid = os.getpid()
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if proc.info["pid"] == my_pid:
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if len(cmdline) < 4:
+                continue
+            if cmdline[-3:] == ["-m", "bot", "run"]:
+                name = (proc.info.get("name") or "").lower()
+                if name in ("python.exe", "python3.exe", "python", "python3"):
+                    print(f"偵測到舊 Bot 進程 PID={proc.info['pid']}，正在關閉...")
+                    os.kill(proc.info["pid"], 9)
+                    import time
+                    time.sleep(1)
+                    print("已關閉舊進程。")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+
+def cmd_run_futures(args) -> None:
+    _kill_existing_bot()
+
+    from bot.app_futures import FuturesTradingBot
+
+    bot = FuturesTradingBot(config_path=args.config)
+    bot.run()
+
+
+def cmd_futures_balance() -> None:
+    from bot.config.settings import Settings
+    from bot.exchange.futures_client import FuturesBinanceClient
+
+    settings = Settings.load()
+    client = FuturesBinanceClient(settings.exchange, settings.futures)
+
+    balance = client.get_futures_balance()
+    positions = client.get_positions()
+
+    print("\n=== 合約帳戶餘額 ===")
+    print(f"  錢包餘額:     {balance['total_wallet_balance']:.4f} USDT")
+    print(f"  可用餘額:     {balance['available_balance']:.4f} USDT")
+    print(f"  未實現盈虧:   {balance['total_unrealized_pnl']:.4f} USDT")
+    print(f"  保證金餘額:   {balance['total_margin_balance']:.4f} USDT")
+
+    ratio = client.get_margin_ratio()
+    print(f"  保證金比率:   {ratio:.2%}")
+
+    if positions:
+        print(f"\n=== 持倉 ({len(positions)}) ===")
+        for pos in positions:
+            side_label = "多" if pos["side"] == "long" else "空"
+            print(
+                f"  {pos['symbol']} [{side_label}] "
+                f"數量={pos['contracts']:.8f} "
+                f"入場={pos['entry_price']:.2f} "
+                f"標記={pos['mark_price']:.2f} "
+                f"PnL={pos['unrealized_pnl']:.4f} "
+                f"清算={pos['liquidation_price']:.2f} "
+                f"槓桿={pos['leverage']}x"
+            )
+    else:
+        print("\n  無持倉")
 
 
 def cmd_run_async(args) -> None:
@@ -123,7 +204,7 @@ def _cmd_backtest_ohlcv(args, strategy_name: str) -> None:
     symbol = args.symbol
     df = fetcher.fetch_historical(
         symbol=symbol,
-        timeframe=settings.trading.timeframe,
+        timeframe=settings.spot.timeframe,
         start_date=settings.backtest.start_date,
         end_date=settings.backtest.end_date,
     )
@@ -131,7 +212,7 @@ def _cmd_backtest_ohlcv(args, strategy_name: str) -> None:
     print(f"已載入 {len(df)} 根 K 線")
 
     strategy = SMACrossoverStrategy(settings.strategy.params)
-    engine = BacktestEngine(settings.backtest, settings.risk)
+    engine = BacktestEngine(settings.backtest, settings.spot)
 
     metrics = engine.run(strategy, df, symbol)
     print(metrics)
@@ -171,7 +252,7 @@ def _cmd_backtest_orderflow(args) -> None:
 
     engine = TickBacktestEngine(
         config=settings.backtest,
-        risk_config=settings.risk,
+        risk_config=settings.spot,
         orderflow_config=settings.orderflow,
     )
 
@@ -573,9 +654,9 @@ def cmd_validate() -> None:
         settings = Settings.load()
         setup_logging(level="INFO")
         print("配置驗證通過!")
-        print(f"  交易模式: {settings.trading.mode.value}")
-        print(f"  交易對:   {', '.join(settings.trading.pairs)}")
-        print(f"  時間框架: {settings.trading.timeframe}")
+        print(f"  交易模式: {settings.spot.mode.value}")
+        print(f"  交易對:   {', '.join(settings.spot.pairs)}")
+        print(f"  時間框架: {settings.spot.timeframe}")
         print(f"  策略:     {settings.strategy.name}")
         print(f"  LLM:      {'啟用' if settings.llm.enabled else '停用'}")
         print(f"  測試網:   {settings.exchange.testnet}")

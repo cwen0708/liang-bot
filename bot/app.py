@@ -3,23 +3,32 @@
 流程：持續運行 → 定時抓取 K 線 + aggTrade → 所有策略產生結論 → LLM 分析 → 執行。
 """
 
+from __future__ import annotations
+
 import signal
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from typing import TYPE_CHECKING
 
-from bot.config.settings import LoanGuardConfig, Settings
+if TYPE_CHECKING:
+    import pandas as pd
+
+from bot.config.settings import FuturesConfig, LoanGuardConfig, Settings
 from bot.db.supabase_client import SupabaseWriter
 from bot.data.bar_aggregator import BarAggregator
 from bot.data.fetcher import DataFetcher
 from bot.exchange.binance_client import BinanceClient
+from bot.exchange.futures_client import FuturesBinanceClient
 from bot.execution.executor import OrderExecutor
+from bot.execution.futures_executor import FuturesOrderExecutor
 from bot.execution.order_manager import OrderManager
 from bot.llm.decision_engine import LLMDecisionEngine
 from bot.llm.schemas import PortfolioState, PositionInfo
 from bot.logging_config import get_logger
 from bot.logging_config.logger import attach_supabase_handler, setup_logging
 from bot.risk.manager import RiskManager
+from bot.risk.futures_manager import FuturesRiskManager
 from bot.config.constants import DataFeedType
 from bot.strategy.base import BaseStrategy, Strategy
 from bot.strategy.router import StrategyRouter
@@ -36,6 +45,28 @@ logger = get_logger("app")
 _L1 = "  "        # Level 1: symbol
 _L2 = "    "      # Level 2: strategy / action
 _L3 = "      "    # Level 3: sub-detail
+
+# Timeframe → 分鐘數對映
+_TF_MINUTES: dict[str, int] = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
+    "1d": 1440, "3d": 4320, "1w": 10080, "1M": 43200,
+}
+
+
+def _current_slot(timeframe: str, tz_offset_hours: int = 8) -> tuple[int, str]:
+    """計算當前時間區間編號（從 UTC+tz_offset 00:00 起算）及區間起始時間字串。"""
+    tf_min = _TF_MINUTES.get(timeframe, 60)
+    now_utc = datetime.now(timezone.utc)
+    local_now = now_utc + timedelta(hours=tz_offset_hours)
+    minutes_since_midnight = local_now.hour * 60 + local_now.minute
+    slot = minutes_since_midnight // tf_min + 1  # 從 1 開始
+    # 區間起始時間
+    slot_start_min = (slot - 1) * tf_min
+    slot_h, slot_m = divmod(slot_start_min, 60)
+    slot_start_str = f"{slot_h:02d}:{slot_m:02d}"
+    return slot, slot_start_str
+
 
 # OHLCV 策略註冊表
 OHLCV_STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
@@ -66,7 +97,23 @@ class TradingBot:
             log_dir=self.settings.logging.log_dir,
         )
 
-        logger.info("初始化交易機器人 (模式=%s)", self.settings.trading.mode)
+        # Supabase 寫入層（提前建立，以便載入線上配置）
+        self._db = SupabaseWriter()
+        self._config_version: int = 0
+
+        # 優先載入 Supabase 線上配置（覆蓋本地 config.yaml）
+        remote_cfg = self._db.load_config()
+        if remote_cfg is not None:
+            try:
+                self.settings = Settings.from_dict(remote_cfg, self.settings)
+                self._config_version = self._db._last_config_version
+                logger.info("已載入 Supabase 線上配置 (version=%d)", self._config_version)
+            except Exception as e:
+                logger.warning("載入 Supabase 配置失敗，使用本地配置: %s", e)
+        else:
+            logger.info("Supabase 無配置或未變更，使用本地 config.yaml")
+
+        logger.info("初始化交易機器人 (模式=%s)", self.settings.spot.mode)
 
         self.exchange = BinanceClient(self.settings.exchange)
         self.data_fetcher = DataFetcher(self.exchange)
@@ -76,12 +123,18 @@ class TradingBot:
         self._create_all_strategies()
         self._strategy_fingerprint = self._get_strategy_fingerprint()
 
+        # 合約策略清單（獨立或共用現貨策略）
+        self._futures_strategies: list[Strategy] = self.strategies
+
         # 訂單流快取載入追蹤
         self._cache_loaded: set[str] = set()
 
-        self.risk_manager = RiskManager(self.settings.risk)
-        self.executor = OrderExecutor(self.exchange, self.settings.trading.mode)
+        self.risk_manager = RiskManager(self.settings.spot)
+        self.executor = OrderExecutor(self.exchange, self.settings.spot.mode)
         self.order_manager = OrderManager()
+
+        # 從 Supabase 恢復持倉到 RiskManager（重啟接續）
+        self._restore_positions()
 
         # 策略路由器
         self.router = StrategyRouter()
@@ -93,9 +146,15 @@ class TradingBot:
         from bot.llm.client import ClaudeCLIClient
         self._llm_client = ClaudeCLIClient(self.settings.llm)
 
-        # Supabase 寫入層
-        self._db = SupabaseWriter()
         attach_supabase_handler(self._db)
+
+        # ── 合約交易模組（若啟用）──
+        self._futures_enabled = self.settings.futures.enabled
+        self._futures_exchange: FuturesBinanceClient | None = None
+        self._futures_risk: FuturesRiskManager | None = None
+        self._futures_executor: FuturesOrderExecutor | None = None
+        if self._futures_enabled:
+            self._init_futures()
 
         # 每個交易對一個 BarAggregator（跨輪保留，持續聚合）
         self._aggregators: dict[str, BarAggregator] = {}
@@ -111,7 +170,51 @@ class TradingBot:
 
         self._running = False
         self._start_time: float = 0.0
-        self._config_version: int = 0
+
+    def _restore_positions(self) -> None:
+        """從 Supabase positions 表恢復持倉到 RiskManager（重啟接續）。"""
+        mode = self.settings.spot.mode.value
+        rows = self._db.load_positions(mode)
+        for row in rows:
+            symbol = row.get("symbol", "")
+            qty = row.get("quantity", 0)
+            entry = row.get("entry_price", 0)
+            if symbol and qty > 0 and entry > 0:
+                self.risk_manager.add_position(symbol, qty, entry)
+        if rows:
+            logger.info("已從 Supabase 恢復 %d 筆 %s 模式持倉", len(rows), mode)
+
+    def _init_futures(self) -> None:
+        """初始化合約交易模組。"""
+        fc = self.settings.futures
+        logger.info(
+            "初始化合約模組: 交易對=%s, 槓桿=%dx, 保證金=%s, 模式=%s",
+            fc.pairs, fc.leverage, fc.margin_type, fc.mode.value,
+        )
+        self._futures_exchange = FuturesBinanceClient(self.settings.exchange, fc)
+        self._futures_risk = FuturesRiskManager(fc)
+        self._futures_executor = FuturesOrderExecutor(self._futures_exchange, fc.mode)
+        self._create_futures_strategies()
+        self._restore_futures_positions()
+
+    def _restore_futures_positions(self) -> None:
+        """從 Supabase 恢復合約持倉。"""
+        if not self._futures_risk:
+            return
+        mode = self.settings.futures.mode.value
+        rows = self._db.load_positions(mode, market_type="futures")
+        for row in rows:
+            symbol = row.get("symbol", "")
+            qty = row.get("quantity", 0)
+            entry = row.get("entry_price", 0)
+            side = row.get("side", "long")
+            leverage = row.get("leverage", self.settings.futures.leverage)
+            if symbol and qty > 0 and entry > 0:
+                self._futures_risk.add_position(
+                    symbol, side, qty, entry, leverage,
+                )
+        if rows:
+            logger.info("已從 Supabase 恢復 %d 筆合約 %s 模式持倉", len(rows), mode)
 
     def _create_all_strategies(self) -> None:
         """根據 config 建立所有策略（OHLCV + 訂單流），統一存入 self.strategies。"""
@@ -149,6 +252,30 @@ class TradingBot:
             self.strategies.append(SMACrossoverStrategy(params))
             logger.info("使用預設 sma_crossover 策略")
 
+    def _create_futures_strategies(self) -> None:
+        """建立合約專用策略清單；若 futures.strategies 為空則共用現貨策略。"""
+        fc = self.settings.futures
+        if not fc.strategies:
+            self._futures_strategies = self.strategies
+            return
+
+        self._futures_strategies = []
+        for strat_cfg in fc.strategies:
+            name = strat_cfg.get("name", "")
+            params = strat_cfg.get("params", {})
+            interval_n = strat_cfg.get("interval_n", 60)
+
+            if name in OHLCV_STRATEGY_REGISTRY:
+                params["_interval_n"] = interval_n
+                self._futures_strategies.append(OHLCV_STRATEGY_REGISTRY[name](params))
+                logger.info("載入合約策略: %s (interval_n=%d)", name, interval_n)
+            else:
+                logger.warning("未知合約策略: %s，跳過", name)
+
+        if not self._futures_strategies:
+            self._futures_strategies = self.strategies
+            logger.info("合約策略清單為空，共用現貨策略")
+
     def _get_strategy_fingerprint(self) -> str:
         """取得目前策略配置的指紋（用於偵測變更）。"""
         configs = self.settings.strategies_config.strategies
@@ -161,22 +288,30 @@ class TradingBot:
 
         all_names = [s.name for s in self.strategies]
         lg = self.settings.loan_guard
+        fc = self.settings.futures
         logger.info(
-            "啟動交易: 交易對=%s, 時間框架=%s, 策略=%s, LLM=%s, 借款監控=%s",
-            self.settings.trading.pairs,
-            self.settings.trading.timeframe,
+            "啟動交易: 現貨=%s, 時間框架=%s, 策略=%s, LLM=%s, 借款監控=%s, 合約=%s",
+            self.settings.spot.pairs,
+            self.settings.spot.timeframe,
             all_names,
             "啟用" if self.llm_engine.enabled else "停用",
             f"啟用 (低買>{lg.danger_ltv:.0%}, 高賣<{lg.low_ltv:.0%}, 目標={lg.target_ltv:.0%}{', 模擬' if lg.dry_run else ''})"
             if lg.enabled else "停用",
+            f"啟用 (交易對={fc.pairs}, {fc.leverage}x, {fc.mode.value})" if fc.enabled else "停用",
         )
 
         self._start_time = time.monotonic()
-        cycle = 0
+        cycle = self._db.get_last_cycle_num()
+        if cycle > 0:
+            logger.info("從 Supabase 接續 cycle_num=%d", cycle)
         while self._running:
             cycle += 1
             cycle_id = f"c{cycle}-{uuid.uuid4().hex[:8]}"
-            logger.info("═══ 第 %d 輪分析開始 (%s) ═══", cycle, cycle_id)
+            slot, slot_start = _current_slot(self.settings.spot.timeframe)
+            logger.info(
+                "═══ 第 %d 輪分析開始 (%s) | %s 第 %d 區間 (自 %s) ═══",
+                cycle, cycle_id, self.settings.spot.timeframe, slot, slot_start,
+            )
 
             # 從 Supabase 載入最新配置（若版本已變更）
             new_cfg = self._db.load_config()
@@ -186,11 +321,24 @@ class TradingBot:
                     self._config_version = self._db._last_config_version
                     logger.info("已套用 Supabase 新配置 (version=%d)", self._config_version)
 
+                    # 合約熱重載
+                    if self.settings.futures.enabled and not self._futures_enabled:
+                        self._futures_enabled = True
+                        self._init_futures()
+                        logger.info("合約模組已啟用")
+                    elif not self.settings.futures.enabled and self._futures_enabled:
+                        self._futures_enabled = False
+                        self._futures_exchange = None
+                        self._futures_risk = None
+                        self._futures_executor = None
+                        logger.info("合約模組已停用")
+
                     # 策略熱重載：偵測策略清單或參數變更
                     new_fp = self._get_strategy_fingerprint()
                     if new_fp != self._strategy_fingerprint:
                         old_names = [s.name for s in self.strategies]
                         self._create_all_strategies()
+                        self._create_futures_strategies()
                         self._cache_loaded.clear()  # 訂單流快取需重新載入
                         self._last_strategy_slot.clear()  # 重置 slot 讓新策略立即執行
                         self._strategy_fingerprint = new_fp
@@ -199,11 +347,25 @@ class TradingBot:
                 except Exception as e:
                     logger.error("套用 Supabase 配置失敗: %s（保留舊配置）", e)
 
-            for symbol in self.settings.trading.pairs:
+            for symbol in self.settings.spot.pairs:
                 try:
                     self._process_symbol(symbol, cycle_id, cycle)
                 except Exception:
                     logger.exception("%s處理時發生錯誤", _L1)
+
+            # ── 合約交易對處理 ──
+            if self._futures_enabled and self._futures_exchange:
+                for symbol in self.settings.futures.pairs:
+                    try:
+                        self._process_futures_symbol(symbol, cycle_id, cycle)
+                    except Exception:
+                        logger.exception("%s[合約] %s 處理時發生錯誤", _L1, symbol)
+
+                # 記錄合約保證金快照
+                try:
+                    self._record_futures_margin()
+                except Exception:
+                    logger.debug("合約保證金快照失敗", exc_info=True)
 
             # 借款 LTV 監控（AI 審核可能耗時，先寫一次心跳避免前端誤判離線）
             if self.settings.loan_guard.enabled:
@@ -212,7 +374,7 @@ class TradingBot:
                     cycle_num=cycle,
                     status="running",
                     config_ver=self._config_version,
-                    pairs=list(self.settings.trading.pairs),
+                    pairs=list(self.settings.spot.pairs),
                     uptime_sec=uptime_mid,
                 )
                 try:
@@ -245,7 +407,7 @@ class TradingBot:
                 cycle_num=cycle,
                 status="running",
                 config_ver=self._config_version,
-                pairs=list(self.settings.trading.pairs),
+                pairs=list(self.settings.spot.pairs),
                 uptime_sec=uptime,
             )
             self._db.flush_logs()
@@ -253,9 +415,9 @@ class TradingBot:
             if self._running:
                 logger.info(
                     "═══ 第 %d 輪完成，%d 秒後進行下一輪 ═══",
-                    cycle, self.settings.trading.check_interval_seconds,
+                    cycle, self.settings.spot.check_interval_seconds,
                 )
-                time.sleep(self.settings.trading.check_interval_seconds)
+                time.sleep(self.settings.spot.check_interval_seconds)
 
     def _process_symbol(self, symbol: str, cycle_id: str = "", cycle: int = 1) -> None:
         """
@@ -266,7 +428,7 @@ class TradingBot:
         max_required = max((s.required_candles for s in ohlcv_strategies), default=50)
         df = self.data_fetcher.fetch_ohlcv(
             symbol,
-            timeframe=self.settings.trading.timeframe,
+            timeframe=self.settings.spot.timeframe,
             limit=max(max_required + 10, 100),
         )
 
@@ -429,6 +591,7 @@ class TradingBot:
         symbol: str,
         current_price: float,
         cycle_id: str = "",
+        market_type: str = "spot",
     ) -> tuple[Signal, float]:
         """所有非 HOLD 決策強制過 LLM 審查；LLM 失敗直接 HOLD。"""
         non_hold = [v for v in verdicts if v.signal != Signal.HOLD]
@@ -438,12 +601,17 @@ class TradingBot:
         # ── LLM 審查（強制） ──
         if self.llm_engine.enabled:
             try:
-                portfolio = self._build_portfolio_state(symbol, current_price)
+                portfolio = (
+                    self._build_futures_portfolio_state(symbol, current_price)
+                    if market_type == "futures"
+                    else self._build_portfolio_state(symbol, current_price)
+                )
                 decision = self.llm_engine.decide_sync(
                     verdicts=verdicts,
                     portfolio=portfolio,
                     symbol=symbol,
                     current_price=current_price,
+                    market_type=market_type,
                 )
                 self._db.insert_llm_decision(
                     symbol, decision.action, decision.confidence,
@@ -455,7 +623,10 @@ class TradingBot:
                     _L2, decision.action, decision.confidence,
                     decision.reasoning[:100],
                 )
-                action_map = {"BUY": Signal.BUY, "SELL": Signal.SELL}
+                action_map = {
+                    "BUY": Signal.BUY, "SELL": Signal.SELL,
+                    "SHORT": Signal.SHORT, "COVER": Signal.COVER,
+                }
                 return action_map.get(decision.action, Signal.HOLD), decision.confidence
             except Exception as e:
                 logger.warning("%sLLM 決策失敗 → HOLD: %s", _L2, e)
@@ -493,10 +664,54 @@ class TradingBot:
         return PortfolioState(
             available_balance=usdt_balance,
             positions=positions,
-            max_positions=self.settings.risk.max_open_positions,
+            max_positions=self.settings.spot.max_open_positions,
             current_position_count=self.risk_manager.open_position_count,
             daily_realized_pnl=self.risk_manager._daily_pnl,
-            daily_risk_remaining=usdt_balance * self.settings.risk.max_daily_loss_pct + self.risk_manager._daily_pnl,
+            daily_risk_remaining=usdt_balance * self.settings.spot.max_daily_loss_pct + self.risk_manager._daily_pnl,
+        )
+
+    def _build_futures_portfolio_state(
+        self, symbol: str, current_price: float
+    ) -> PortfolioState:
+        """建構合約投資組合狀態（供合約 LLM 參考）。"""
+        if not self._futures_exchange or not self._futures_risk:
+            return self._build_portfolio_state(symbol, current_price)
+
+        try:
+            balance = self._futures_exchange.get_futures_balance()
+            available = balance["available_balance"]
+        except Exception:
+            available = 0.0
+
+        positions = []
+        for key, pos_data in self._futures_risk._open_positions.items():
+            sym = pos_data["symbol"]
+            entry = pos_data["entry_price"]
+            qty = pos_data["quantity"]
+            side = pos_data["side"]
+            price_now = current_price if sym == symbol else entry
+            if side == "long":
+                pnl = (price_now - entry) * qty
+            else:
+                pnl = (entry - price_now) * qty
+            pnl_pct = pnl / (entry * qty) if entry * qty > 0 else 0.0
+
+            positions.append(PositionInfo(
+                symbol=f"{sym}({side})",
+                quantity=qty,
+                entry_price=entry,
+                current_price=price_now,
+                unrealized_pnl=pnl,
+                unrealized_pnl_pct=pnl_pct,
+            ))
+
+        return PortfolioState(
+            available_balance=available,
+            positions=positions,
+            max_positions=self.settings.futures.max_open_positions,
+            current_position_count=self._futures_risk.open_position_count,
+            daily_realized_pnl=self._futures_risk._daily_pnl,
+            daily_risk_remaining=available * self.settings.futures.max_daily_loss_pct + self._futures_risk._daily_pnl,
         )
 
     def _execute_buy(self, symbol: str, price: float, risk_output,
@@ -523,7 +738,7 @@ class TradingBot:
                 sl_order_id=sl_order_id,
             )
             self.order_manager.add_order(order)
-            _mode = self.settings.trading.mode.value
+            _mode = self.settings.spot.mode.value
             self._db.insert_order(order, mode=_mode, cycle_id=cycle_id)
             self._db.upsert_position(symbol, {
                 "quantity": risk_output.quantity,
@@ -556,10 +771,307 @@ class TradingBot:
             fill_price = order.get("price", price)
             pnl = self.risk_manager.remove_position(symbol, fill_price)
             self.order_manager.add_order(order)
-            _mode = self.settings.trading.mode.value
+            _mode = self.settings.spot.mode.value
             self._db.insert_order(order, mode=_mode, cycle_id=cycle_id)
             self._db.delete_position(symbol, mode=_mode)
             logger.info("%s✓ SELL %s @ %.2f, PnL=%.2f USDT", _L3, symbol, fill_price, pnl)
+
+    # ════════════════════════════════════════════════════════════
+    # 合約交易方法
+    # ════════════════════════════════════════════════════════════
+
+    def _process_futures_symbol(self, symbol: str, cycle_id: str = "",
+                                cycle: int = 1) -> None:
+        """處理單一合約交易對。"""
+        assert self._futures_exchange and self._futures_risk and self._futures_executor
+
+        # 確保槓桿和保證金模式已設定
+        self._futures_exchange.ensure_leverage_and_margin(symbol)
+
+        # ── 1. 取得 K 線 ──
+        ohlcv_strategies = [s for s in self._futures_strategies if s.data_feed_type == DataFeedType.OHLCV]
+        max_required = max((s.required_candles for s in ohlcv_strategies), default=50)
+        df = self._futures_exchange.get_ohlcv(
+            symbol,
+            timeframe=self.settings.futures.timeframe,
+            limit=max(max_required + 10, 100),
+        )
+
+        if len(df) < max_required:
+            logger.warning("%s[合約] %s K 線資料不足: %d/%d", _L1, symbol, len(df), max_required)
+            return
+
+        current_price = float(df["close"].iloc[-1])
+        logger.info("%s[合約] %s 現價: %.2f USDT", _L1, symbol, current_price)
+
+        # ── 2. 停損停利（多倉 + 空倉都要檢查）──
+        for side in ("long", "short"):
+            pos = self._futures_risk.get_position(symbol, side)
+            if not pos:
+                continue
+
+            # Live 模式：檢查交易所掛單
+            if self._futures_executor.is_live and self._futures_risk.has_exchange_sl_tp(symbol, side):
+                if self._sync_futures_sl_tp(symbol, side):
+                    continue
+
+            # Paper 模式（或 live 無掛單）：輪詢
+            if not self._futures_risk.has_exchange_sl_tp(symbol, side):
+                sl_tp_signal = self._futures_risk.check_stop_loss_take_profit(
+                    symbol, side, current_price,
+                )
+                if sl_tp_signal in (Signal.SELL, Signal.COVER):
+                    close_side = "long" if sl_tp_signal == Signal.SELL else "short"
+                    logger.info("%s[合約] %s %s倉觸發停損/停利", _L2, symbol, close_side)
+                    self._execute_futures_close(symbol, close_side, current_price, cycle_id)
+
+        # ── 3. 收集策略結論 ──
+        self.router.clear()
+        now = datetime.now(timezone.utc)
+        minutes_since_midnight = now.hour * 60 + now.minute
+
+        for strategy in self._futures_strategies:
+            if strategy.data_feed_type != DataFeedType.OHLCV:
+                continue
+            if strategy.interval_n > 0:
+                slot = minutes_since_midnight // strategy.interval_n
+                # 合約用獨立的 slot key 避免跟現貨衝突
+                slot_key = f"futures:{strategy.name}"
+                last_slot = self._last_strategy_slot.get(slot_key, -1)
+                if slot == last_slot:
+                    continue
+                self._last_strategy_slot[slot_key] = slot
+
+            try:
+                if len(df) < strategy.required_candles:
+                    continue
+                verdict = strategy.generate_verdict(df)
+            except Exception:
+                logger.exception("%s[合約][%s] 策略執行失敗", _L2, strategy.name)
+                continue
+
+            if verdict is not None:
+                self.router.collect(verdict)
+                self._db.insert_verdict(
+                    symbol, strategy.name, verdict.signal.value,
+                    verdict.confidence, verdict.reasoning, cycle_id,
+                )
+
+        verdicts = self.router.get_verdicts()
+        if not verdicts:
+            return
+
+        # ── 4. 訊號轉換 + LLM 決策 ──
+        non_hold = [v for v in verdicts if v.signal != Signal.HOLD]
+        if not non_hold:
+            return
+
+        # 先做 LLM 審查（用現有 LLM 引擎，傳入 market_type="futures"）
+        final_signal, final_confidence = self._make_decision(
+            verdicts, symbol, current_price, cycle_id,
+            market_type="futures",
+        )
+
+        if final_signal == Signal.HOLD:
+            return
+
+        min_conf = self.settings.futures.min_confidence
+        if final_confidence < min_conf:
+            logger.info(
+                "%s[合約] %s 信心 %.2f 低於門檻 %.2f → HOLD",
+                _L2, final_signal.value, final_confidence, min_conf,
+            )
+            return
+
+        # 訊號轉換：根據持倉狀態將 BUY/SELL 轉為合約訊號
+        final_signal = self._translate_futures_signal(final_signal, symbol)
+        if final_signal == Signal.HOLD:
+            return
+
+        logger.info("%s[合約] → %s (信心 %.2f)", _L2, final_signal.value, final_confidence)
+
+        # ── 5. 風控 + 執行 ──
+        if final_signal in (Signal.BUY, Signal.SHORT):
+            self._execute_futures_open(symbol, final_signal, current_price, cycle_id, ohlcv=df)
+        elif final_signal in (Signal.SELL, Signal.COVER):
+            side = "long" if final_signal == Signal.SELL else "short"
+            self._execute_futures_close(symbol, side, current_price, cycle_id)
+
+    def _translate_futures_signal(self, signal: Signal, symbol: str) -> Signal:
+        """
+        將策略/LLM 的 BUY/SELL 轉換為合約訊號。
+
+        邏輯:
+            SELL + 持有多倉 → SELL（平多）
+            SELL + 無持倉   → SHORT（開空）
+            BUY  + 持有空倉 → COVER（平空）
+            BUY  + 無持倉   → BUY（開多）
+        """
+        assert self._futures_risk
+
+        has_long = self._futures_risk.get_position(symbol, "long") is not None
+        has_short = self._futures_risk.get_position(symbol, "short") is not None
+
+        if signal == Signal.SELL:
+            if has_long:
+                return Signal.SELL   # 平多
+            else:
+                return Signal.SHORT  # 開空
+        elif signal == Signal.BUY:
+            if has_short:
+                return Signal.COVER  # 平空
+            else:
+                return Signal.BUY    # 開多
+        elif signal in (Signal.SHORT, Signal.COVER):
+            return signal  # LLM 直接回傳 SHORT/COVER
+        return Signal.HOLD
+
+    def _execute_futures_open(self, symbol: str, signal: Signal,
+                              price: float, cycle_id: str = "",
+                              ohlcv: pd.DataFrame | None = None) -> None:
+        """執行合約開倉（開多或開空）。"""
+        assert self._futures_exchange and self._futures_risk and self._futures_executor
+
+        side = "long" if signal == Signal.BUY else "short"
+
+        # 取可用保證金
+        try:
+            balance = self._futures_exchange.get_futures_balance()
+            available = balance["available_balance"]
+            margin_ratio = self._futures_exchange.get_margin_ratio()
+        except Exception as e:
+            logger.warning("%s[合約] 取得保證金失敗: %s", _L2, e)
+            return
+
+        risk_output = self._futures_risk.evaluate(
+            signal, symbol, price, available, margin_ratio, ohlcv=ohlcv,
+        )
+        if not risk_output.approved:
+            logger.info("%s[合約] 風控拒絕: %s", _L2, risk_output.reason)
+            return
+
+        order = self._futures_executor.execute(signal, symbol, risk_output)
+        if not order:
+            return
+
+        fill_price = order.get("price", price)
+        leverage = self.settings.futures.leverage
+
+        # 掛 SL/TP
+        tp_order_id, sl_order_id = None, None
+        oco_info = self._futures_executor.place_sl_tp(
+            symbol, risk_output.quantity, side,
+            risk_output.take_profit_price, risk_output.stop_loss_price,
+        )
+        if oco_info:
+            tp_order_id = oco_info.get("tp_order_id")
+            sl_order_id = oco_info.get("sl_order_id")
+
+        self._futures_risk.add_position(
+            symbol, side, risk_output.quantity, fill_price, leverage,
+            tp_order_id=tp_order_id, sl_order_id=sl_order_id,
+        )
+
+        _mode = self.settings.futures.mode.value
+        side_label = "開多" if side == "long" else "開空"
+        self._db.insert_order(
+            order, mode=_mode, cycle_id=cycle_id,
+            market_type="futures", position_side=side,
+            leverage=leverage, reduce_only=False,
+        )
+        self._db.upsert_position(symbol, {
+            "side": side,
+            "leverage": leverage,
+            "quantity": risk_output.quantity,
+            "entry_price": fill_price,
+            "current_price": fill_price,
+            "unrealized_pnl": 0,
+            "stop_loss": risk_output.stop_loss_price,
+            "take_profit": risk_output.take_profit_price,
+            "liquidation_price": risk_output.liquidation_price,
+            "margin_type": self.settings.futures.margin_type,
+        }, mode=_mode, market_type="futures")
+
+        logger.info(
+            "%s[合約] %s %s @ %.2f, qty=%.8f, %dx (SL=%.2f, TP=%.2f, 清算=%.2f)",
+            _L3, side_label, symbol, fill_price, risk_output.quantity,
+            leverage, risk_output.stop_loss_price, risk_output.take_profit_price,
+            risk_output.liquidation_price,
+        )
+
+    def _execute_futures_close(self, symbol: str, side: str,
+                               price: float, cycle_id: str = "") -> None:
+        """執行合約平倉（平多或平空）。"""
+        assert self._futures_exchange and self._futures_risk and self._futures_executor
+
+        close_signal = Signal.SELL if side == "long" else Signal.COVER
+
+        # 取消 SL/TP 掛單
+        tp_id, sl_id = self._futures_risk.get_sl_tp_order_ids(symbol, side)
+        if tp_id or sl_id:
+            self._futures_executor.cancel_sl_tp(symbol, tp_id, sl_id)
+
+        risk_output = self._futures_risk.evaluate(close_signal, symbol, price, 0)
+        if not risk_output.approved:
+            return
+
+        order = self._futures_executor.execute(close_signal, symbol, risk_output)
+        if not order:
+            return
+
+        fill_price = order.get("price", price)
+        pnl = self._futures_risk.remove_position(symbol, side, fill_price)
+
+        _mode = self.settings.futures.mode.value
+        side_label = "平多" if side == "long" else "平空"
+        self._db.insert_order(
+            order, mode=_mode, cycle_id=cycle_id,
+            market_type="futures", position_side=side,
+            leverage=self.settings.futures.leverage, reduce_only=True,
+        )
+        self._db.delete_position(symbol, mode=_mode, market_type="futures", side=side)
+
+        logger.info(
+            "%s[合約] %s %s @ %.2f, PnL=%.2f USDT",
+            _L3, side_label, symbol, fill_price, pnl,
+        )
+
+    def _sync_futures_sl_tp(self, symbol: str, side: str) -> bool:
+        """檢查合約 SL/TP 掛單是否已成交。"""
+        assert self._futures_exchange and self._futures_risk
+
+        tp_id, sl_id = self._futures_risk.get_sl_tp_order_ids(symbol, side)
+        for order_id, label in [(tp_id, "停利"), (sl_id, "停損")]:
+            if not order_id:
+                continue
+            try:
+                status = self._futures_exchange.get_order_status(order_id, symbol)
+                if status["status"] == "closed":
+                    fill_price = status.get("price", 0)
+                    pnl = self._futures_risk.remove_position(symbol, side, fill_price)
+                    _mode = self.settings.futures.mode.value
+                    self._db.delete_position(symbol, mode=_mode, market_type="futures", side=side)
+                    logger.info(
+                        "%s[合約] 交易所 %s 成交: %s %s @ %.2f, PnL=%.2f USDT",
+                        _L2, label, symbol, side, fill_price, pnl,
+                    )
+                    return True
+            except Exception as e:
+                logger.debug("[合約] 查詢訂單 %s 失敗: %s", order_id, e)
+        return False
+
+    def _record_futures_margin(self) -> None:
+        """記錄合約保證金帳戶快照。"""
+        assert self._futures_exchange
+        balance = self._futures_exchange.get_futures_balance()
+        margin_ratio = self._futures_exchange.get_margin_ratio()
+        self._db.insert_futures_margin(
+            wallet_balance=balance["total_wallet_balance"],
+            available_balance=balance["available_balance"],
+            unrealized_pnl=balance["total_unrealized_pnl"],
+            margin_balance=balance["total_margin_balance"],
+            margin_ratio=margin_ratio,
+        )
 
     def _check_loan_health(self) -> None:
         """檢查借款 LTV，超過危險閾值時提交 AI 審核後買入質押物。"""
@@ -614,6 +1126,16 @@ class TradingBot:
                 self._loan_take_profit(lg, o, lh_row_id)
             else:
                 logger.info("%s[借款] %s LTV=%.1f%% 安全", _L1, label, ltv * 100)
+
+            # 同步該幣對的借貸調整歷史到 Supabase
+            try:
+                history = self.exchange.fetch_loan_adjust_history(loan_coin, collateral_coin)
+                if history:
+                    count = self._db.sync_loan_adjustments(history)
+                    if count:
+                        logger.info("%s[借款] 同步 %s 調整歷史: 新增 %d 筆", _L1, label, count)
+            except Exception as e:
+                logger.debug("%s[借款] 同步 %s 調整歷史失敗: %s", _L1, label, e)
 
     def _loan_protect(self, lg: LoanGuardConfig, order: dict, lh_row_id: int | None = None) -> None:
         """

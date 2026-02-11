@@ -266,6 +266,78 @@ class BinanceClient(BaseExchange):
         except ccxt.BaseError as e:
             raise ExchangeError(f"調整 LTV 失敗: {e}") from e
 
+    @retry(max_retries=2, delay=1.0)
+    def get_flexible_earn_position(self, asset: str) -> list[dict]:
+        """查詢 Simple Earn Flexible 持倉（特定幣種）。"""
+        try:
+            result = self._exchange.request(
+                "simple-earn/flexible/position",
+                "sapi", "GET", {"asset": asset},
+            )
+            return result.get("rows", [])
+        except ccxt.BaseError as e:
+            raise ExchangeError(f"查詢 Simple Earn 持倉失敗: {e}") from e
+
+    @retry(max_retries=2, delay=0.5)
+    def redeem_flexible_earn(self, product_id: str, amount: float | None = None) -> dict:
+        """
+        贖回 Simple Earn Flexible 產品。
+
+        Args:
+            product_id: 產品 ID（從 get_flexible_earn_position 取得）。
+            amount: 贖回數量，None 表示全部贖回。
+        """
+        params: dict = {"productId": product_id}
+        if amount is not None:
+            params["amount"] = str(amount)
+        else:
+            params["redeemAll"] = True
+
+        try:
+            result = self._exchange.request(
+                "simple-earn/flexible/redeem",
+                "sapi", "POST", params,
+            )
+            logger.info("Simple Earn 贖回成功: productId=%s, amount=%s", product_id, amount or "ALL")
+            return result
+        except ccxt.BaseError as e:
+            raise ExchangeError(f"Simple Earn 贖回失敗: {e}") from e
+
+    def redeem_all_usdt_earn(self) -> float:
+        """
+        自動贖回所有 USDT Simple Earn Flexible 持倉。
+
+        Returns:
+            贖回的總金額（USDT）。若無持倉或贖回失敗則回傳 0。
+        """
+        try:
+            positions = self.get_flexible_earn_position("USDT")
+        except Exception as e:
+            logger.warning("查詢 USDT Earn 持倉失敗: %s", e)
+            return 0.0
+
+        total_redeemed = 0.0
+        for pos in positions:
+            total_amount = float(pos.get("totalAmount", 0))
+            if total_amount <= 0:
+                continue
+
+            product_id = pos.get("productId", "")
+            if not product_id:
+                continue
+
+            try:
+                self.redeem_flexible_earn(product_id)
+                total_redeemed += total_amount
+                logger.info(
+                    "已贖回 USDT Earn: productId=%s, 金額=%.4f",
+                    product_id, total_amount,
+                )
+            except Exception as e:
+                logger.warning("贖回 USDT Earn 失敗 (productId=%s): %s", product_id, e)
+
+        return total_redeemed
+
     @staticmethod
     def _format_order(order: dict) -> dict:
         return {

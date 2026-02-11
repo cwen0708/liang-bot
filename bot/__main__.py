@@ -50,6 +50,11 @@ def main() -> None:
     # validate
     subparsers.add_parser("validate", help="驗證配置")
 
+    # config-push
+    cp_parser = subparsers.add_parser("config-push", help="推送本地 config.yaml 到 Supabase bot_config")
+    cp_parser.add_argument("--config", default=None, help="配置檔路徑")
+    cp_parser.add_argument("--note", default="", help="變更說明")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -70,6 +75,8 @@ def main() -> None:
         cmd_loan_guard(args)
     elif args.command == "validate":
         cmd_validate()
+    elif args.command == "config-push":
+        cmd_config_push(args)
 
 
 def cmd_run(args) -> None:
@@ -574,6 +581,57 @@ def cmd_validate() -> None:
         print(f"  測試網:   {settings.exchange.testnet}")
     except Exception as e:
         print(f"配置驗證失敗: {e}")
+        sys.exit(1)
+
+
+def cmd_config_push(args) -> None:
+    import yaml
+
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from bot.db.supabase_client import SupabaseWriter
+
+    config_path = args.config or "config.yaml"
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_json = yaml.safe_load(f)
+    except Exception as e:
+        print(f"讀取 {config_path} 失敗: {e}")
+        sys.exit(1)
+
+    db = SupabaseWriter()
+    if not db.enabled:
+        print("Supabase 未連線，無法推送")
+        sys.exit(1)
+
+    # 取得目前最新版本號
+    try:
+        resp = (
+            db._client.table("bot_config")
+            .select("version")
+            .order("version", desc=True)
+            .limit(1)
+            .execute()
+        )
+        current_version = resp.data[0]["version"] if resp.data else 0
+    except Exception:
+        current_version = 0
+
+    new_version = current_version + 1
+    note = args.note or f"config-push from CLI"
+
+    try:
+        db._client.table("bot_config").insert({
+            "version": new_version,
+            "config_json": config_json,
+            "changed_by": "cli",
+            "change_note": note,
+        }).execute()
+        print(f"已推送配置 v{new_version} 到 Supabase")
+        print(f"  變更說明: {note}")
+    except Exception as e:
+        print(f"推送失敗: {e}")
         sys.exit(1)
 
 

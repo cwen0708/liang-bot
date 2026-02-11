@@ -82,20 +82,25 @@ class SFPDetector:
         highs: list[float],
         lows: list[float],
         closes: list[float],
+        recency: int = 10,
     ) -> list[SFPEvent]:
         """
-        在整個序列中偵測 SFP 事件。
+        偵測近期的 SFP 事件。
 
         Args:
             highs: 最高價序列。
             lows: 最低價序列。
             closes: 收盤價序列。
+            recency: 只回傳 bar_index 在最近 N 根內的事件。
 
         Returns:
-            SFPEvent 列表。
+            SFPEvent 列表（只含近期事件）。
         """
         if len(highs) < self.swing_detector.lookback * 2 + 2:
             return []
+
+        n = len(highs)
+        min_idx = n - recency  # SFP 觸發 bar 必須在此索引之後
 
         results: list[SFPEvent] = []
 
@@ -103,8 +108,7 @@ class SFPDetector:
         swing_lows = self.swing_detector.find_swing_lows(lows)
         for i in range(len(swing_lows) - 1, -1, -1):
             swing_idx, swing_price = swing_lows[i]
-            # 檢查後續 K 線是否形成 SFP
-            for j in range(swing_idx + 1, len(lows)):
+            for j in range(max(swing_idx + 1, min_idx), n):
                 if lows[j] < swing_price:
                     penetration = (swing_price - lows[j]) / swing_price
                     if penetration >= self.wick_threshold and closes[j] > swing_price:
@@ -119,13 +123,16 @@ class SFPDetector:
                             bar_index=j,
                             strength=strength,
                         ))
-                        break  # 每個擺動點只取第一個 SFP
+                        break
+            # swing point 太舊（遠在 recency 之前），後面的更舊，不用再找
+            if swing_idx < min_idx - recency:
+                break
 
         # 偵測看跌 SFP（刺穿前高後收回）
         swing_highs = self.swing_detector.find_swing_highs(highs)
         for i in range(len(swing_highs) - 1, -1, -1):
             swing_idx, swing_price = swing_highs[i]
-            for j in range(swing_idx + 1, len(highs)):
+            for j in range(max(swing_idx + 1, min_idx), n):
                 if highs[j] > swing_price:
                     penetration = (highs[j] - swing_price) / swing_price
                     if penetration >= self.wick_threshold and closes[j] < swing_price:
@@ -141,6 +148,8 @@ class SFPDetector:
                             strength=strength,
                         ))
                         break
+            if swing_idx < min_idx - recency:
+                break
 
         return results
 

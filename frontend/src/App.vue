@@ -2,14 +2,18 @@
 import { ref, onMounted } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import { useBotStore } from '@/stores/bot'
+import { useTheme } from '@/composables/useTheme'
 
 const bot = useBotStore()
+const { isDark, toggleTheme } = useTheme()
 const mobileMenuOpen = ref(false)
 
 onMounted(() => {
   bot.fetchStatus()
   bot.fetchPositions()
   bot.fetchLatestPrices()
+  bot.fetchBalances()
+  bot.fetchLoans()
   bot.subscribeRealtime()
 })
 
@@ -27,10 +31,10 @@ const navItems = [
 <template>
   <div class="flex min-h-screen flex-col md:flex-row">
     <!-- Desktop Sidebar -->
-    <aside class="hidden md:flex w-56 bg-(--color-bg-secondary) border-r border-(--color-border) flex-col shrink-0">
+    <aside class="hidden md:flex w-56 bg-(--color-bg-secondary) border-r border-(--color-border) flex-col shrink-0 h-screen sticky top-0">
       <div class="p-4 border-b border-(--color-border)">
-        <h1 class="text-lg font-bold text-(--color-accent)">Spot Bot</h1>
-        <div class="flex items-center gap-2 mt-1 text-xs">
+        <h1 class="text-xl font-bold text-(--color-accent)">Spot Bot</h1>
+        <div class="flex items-center gap-2 mt-1 text-sm">
           <span
             class="w-2 h-2 rounded-full"
             :class="bot.isOnline ? 'bg-(--color-success)' : 'bg-(--color-danger)'"
@@ -49,7 +53,7 @@ const navItems = [
           v-for="item in navItems"
           :key="item.to"
           :to="item.to"
-          class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-(--color-text-secondary) hover:bg-(--color-bg-card) hover:text-(--color-text-primary) transition-colors"
+          class="flex items-center gap-3 px-3 py-2 rounded-lg text-base text-(--color-text-secondary) hover:bg-(--color-bg-card) hover:text-(--color-text-primary) transition-colors"
           active-class="!bg-(--color-bg-card) !text-(--color-accent)"
         >
           <svg class="w-5 h-5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -86,9 +90,25 @@ const navItems = [
         </RouterLink>
       </nav>
 
-      <div class="p-4 border-t border-(--color-border) text-xs text-(--color-text-secondary)">
-        <div v-if="bot.status">
-          運行時間: {{ Math.floor((bot.status.uptime_sec ?? 0) / 60) }} 分鐘
+      <div class="p-4 border-t border-(--color-border) text-sm text-(--color-text-secondary)">
+        <div class="flex items-center justify-between">
+          <div v-if="bot.status">
+            運行 {{ Math.floor((bot.status.uptime_sec ?? 0) / 60) }} 分
+          </div>
+          <button
+            @click="toggleTheme"
+            class="p-1.5 rounded-lg hover:bg-(--color-bg-card) transition-colors text-(--color-text-secondary) hover:text-(--color-text-primary)"
+            :title="isDark ? '切換到淺色模式' : '切換到深色模式'"
+          >
+            <!-- Sun icon (shown in dark mode) -->
+            <svg v-if="isDark" class="w-4.5 h-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+            </svg>
+            <!-- Moon icon (shown in light mode) -->
+            <svg v-else class="w-4.5 h-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+            </svg>
+          </button>
         </div>
       </div>
     </aside>
@@ -102,10 +122,24 @@ const navItems = [
           :class="bot.isOnline ? 'bg-(--color-success)' : 'bg-(--color-danger)'"
         />
       </div>
-      <div class="text-xs text-(--color-text-secondary)">
-        <template v-if="bot.status?.cycle_num">
-          第 {{ bot.status.cycle_num }} 輪
-        </template>
+      <div class="flex items-center gap-3">
+        <span class="text-sm text-(--color-text-secondary)">
+          <template v-if="bot.status?.cycle_num">
+            第 {{ bot.status.cycle_num }} 輪
+          </template>
+        </span>
+        <button
+          @click="toggleTheme"
+          class="p-1.5 rounded-lg hover:bg-(--color-bg-card) transition-colors text-(--color-text-secondary)"
+          :title="isDark ? '切換到淺色模式' : '切換到深色模式'"
+        >
+          <svg v-if="isDark" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+          </svg>
+          <svg v-else class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+          </svg>
+        </button>
       </div>
     </header>
 
@@ -148,7 +182,7 @@ const navItems = [
               <line x1="4" y1="6" x2="20" y2="6" /><line x1="4" y1="10" x2="20" y2="10" /><line x1="4" y1="14" x2="16" y2="14" /><line x1="4" y1="18" x2="12" y2="18" />
             </template>
           </svg>
-          <span class="text-[10px] mt-0.5 truncate w-full text-center">{{ item.label }}</span>
+          <span class="text-xs mt-0.5 truncate w-full text-center">{{ item.label }}</span>
         </RouterLink>
       </div>
     </nav>

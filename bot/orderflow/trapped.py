@@ -56,15 +56,18 @@ class TrappedTraderAnalyzer:
         self.volume_threshold_pct = volume_threshold_pct
         self.reversal_bars = reversal_bars
 
-    def detect(self, bars: list[OrderFlowBar]) -> list[TrappedTraderEvent]:
+    def detect(
+        self, bars: list[OrderFlowBar], recency: int = 20
+    ) -> list[TrappedTraderEvent]:
         """
-        分析 K 線序列，偵測受困交易者。
+        分析 K 線序列，偵測近期受困交易者。
 
         Args:
             bars: OrderFlowBar 序列。
+            recency: 只掃描最近 N 根 bar（需有足夠歷史計算平均量）。
 
         Returns:
-            TrappedTraderEvent 列表。
+            TrappedTraderEvent 列表（只含近期事件）。
         """
         if len(bars) < self.volume_lookback + self.reversal_bars + 1:
             return []
@@ -72,7 +75,10 @@ class TrappedTraderAnalyzer:
         results: list[TrappedTraderEvent] = []
         volumes = [b.volume for b in bars]
 
-        for i in range(self.volume_lookback, len(bars) - self.reversal_bars):
+        # 限制掃描範圍：從 max(volume_lookback, len-recency) 開始
+        scan_start = max(self.volume_lookback, len(bars) - recency)
+
+        for i in range(scan_start, len(bars) - self.reversal_bars):
             bar = bars[i]
 
             # 計算平均成交量

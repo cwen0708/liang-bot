@@ -78,7 +78,8 @@ class SupabaseWriter:
     # ─── Strategy Verdicts ───
 
     def insert_verdict(self, symbol: str, strategy: str, signal: str,
-                       confidence: float, reasoning: str = "") -> None:
+                       confidence: float, reasoning: str = "",
+                       cycle_id: str = "") -> None:
         if not self._enabled:
             return
         try:
@@ -88,6 +89,7 @@ class SupabaseWriter:
                 "signal": signal,
                 "confidence": confidence,
                 "reasoning": reasoning[:500],
+                "cycle_id": cycle_id,
             }).execute()
         except Exception as e:
             logger.debug("寫入 strategy_verdicts 失敗: %s", e)
@@ -95,7 +97,8 @@ class SupabaseWriter:
     # ─── LLM Decisions ───
 
     def insert_llm_decision(self, symbol: str, action: str, confidence: float,
-                            reasoning: str = "", model: str = "") -> None:
+                            reasoning: str = "", model: str = "",
+                            cycle_id: str = "") -> None:
         if not self._enabled:
             return
         try:
@@ -105,13 +108,15 @@ class SupabaseWriter:
                 "confidence": confidence,
                 "reasoning": reasoning[:500],
                 "model": model,
+                "cycle_id": cycle_id,
             }).execute()
         except Exception as e:
             logger.debug("寫入 llm_decisions 失敗: %s", e)
 
     # ─── Orders ───
 
-    def insert_order(self, order: dict) -> None:
+    def insert_order(self, order: dict, mode: str = "live",
+                     cycle_id: str = "") -> None:
         if not self._enabled:
             return
         try:
@@ -125,18 +130,21 @@ class SupabaseWriter:
                 "status": order.get("status", "filled"),
                 "exchange_id": str(order.get("id", "")),
                 "source": order.get("source", "bot"),
+                "mode": mode,
+                "cycle_id": cycle_id,
             }).execute()
         except Exception as e:
             logger.debug("寫入 orders 失敗: %s", e)
 
     # ─── Positions ───
 
-    def upsert_position(self, symbol: str, data: dict) -> None:
+    def upsert_position(self, symbol: str, data: dict, mode: str = "live") -> None:
         if not self._enabled:
             return
         try:
             self._client.table("positions").upsert({
                 "symbol": symbol,
+                "mode": mode,
                 "quantity": data.get("quantity", 0),
                 "entry_price": data.get("entry_price", 0),
                 "current_price": data.get("current_price", 0),
@@ -144,15 +152,16 @@ class SupabaseWriter:
                 "stop_loss": data.get("stop_loss"),
                 "take_profit": data.get("take_profit"),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
-            }, on_conflict="symbol").execute()
+            }, on_conflict="symbol,mode").execute()
         except Exception as e:
             logger.debug("寫入 positions 失敗: %s", e)
 
-    def delete_position(self, symbol: str) -> None:
+    def delete_position(self, symbol: str, mode: str = "live") -> None:
         if not self._enabled:
             return
         try:
-            self._client.table("positions").delete().eq("symbol", symbol).execute()
+            (self._client.table("positions").delete()
+             .eq("symbol", symbol).eq("mode", mode).execute())
         except Exception as e:
             logger.debug("刪除 position 失敗: %s", e)
 
@@ -247,6 +256,28 @@ class SupabaseWriter:
             }).execute()
         except Exception as e:
             logger.debug("寫入 market_snapshots 失敗: %s", e)
+
+    # ─── Account Balances ───
+
+    def insert_balances(self, balances: dict[str, float],
+                        usdt_values: dict[str, float | None],
+                        snapshot_id: str) -> None:
+        """批次寫入帳戶餘額快照。"""
+        if not self._enabled or not balances:
+            return
+        rows = []
+        for currency, free in balances.items():
+            uv = usdt_values.get(currency)
+            rows.append({
+                "currency": currency,
+                "free": free,
+                "usdt_value": uv if uv is not None else 0,
+                "snapshot_id": snapshot_id,
+            })
+        try:
+            self._client.table("account_balances").insert(rows).execute()
+        except Exception as e:
+            logger.debug("寫入 account_balances 失敗: %s", e)
 
     # ─── Bot Status / 心跳 ───
 

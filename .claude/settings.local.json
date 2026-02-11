@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.thingsaboutweb.dev)",
+      "Bash(npx vue-tsc:*)",
+      "Bash(npx vite build)",
+      "Bash(dir:*)",
+      "Bash(npx supabase db push:*)",
+      "mcp__plugin_supabase_supabase__execute_sql",
+      "mcp__plugin_supabase_supabase__list_projects",
+      "Bash(python -m bot config-push:*)",
+      "Bash(python restart_bot.py:*)",
+      "Bash(python -c:*)",
+      "Bash(npm ls:*)",
+      "Bash(findstr:*)",
+      "Bash(pnpm build:*)",
+      "Bash(firebase deploy:*)",
+      "Bash(cmd /c \"cd C:\\\\Github\\\\binance-spot-bot\\\\frontend && npx vue-tsc --noEmit\")",
+      "Bash(powershell:*)",
+      "Bash(npx supabase:*)",
+      "mcp__plugin_supabase_supabase__list_tables",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git reset:*)"
+    ]
+  }
+}

@@ -16,6 +16,7 @@ export interface StrategyVerdict {
   signal: 'BUY' | 'SELL' | 'HOLD'
   confidence: number
   reasoning: string
+  cycle_id: string
   created_at: string
 }
 
@@ -26,6 +27,7 @@ export interface LLMDecision {
   confidence: number
   reasoning: string
   model: string
+  cycle_id: string
   created_at: string
 }
 
@@ -40,6 +42,8 @@ export interface Order {
   status: string
   exchange_id: string
   source: string
+  mode: 'paper' | 'live'
+  cycle_id: string
   created_at: string
 }
 
@@ -52,6 +56,7 @@ export interface Position {
   unrealized_pnl: number
   stop_loss: number | null
   take_profit: number | null
+  mode: 'paper' | 'live'
   updated_at: string
 }
 
@@ -89,4 +94,13 @@ export interface BotStatus {
   pairs: string[]
   uptime_sec: number
   updated_at: string
+}
+
+export interface AccountBalance {
+  id: number
+  currency: string
+  free: number
+  usdt_value: number
+  snapshot_id: string
+  created_at: string
 }

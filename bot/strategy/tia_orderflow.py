@@ -207,16 +207,20 @@ class TiaBTCOrderFlowStrategy(OrderFlowStrategy):
 
         bullish = 0.0
         bearish = 0.0
-        evidence = []
+        best_bull_ev = ""
+        best_bear_ev = ""
 
         for div in divergences:
             if div.divergence_type in (DivergenceType.REGULAR_BULLISH, DivergenceType.HIDDEN_BULLISH):
-                bullish = max(bullish, div.strength)
-                evidence.append(f"CVD {div.divergence_type.value} (強度 {div.strength:.2f})")
+                if div.strength > bullish:
+                    bullish = div.strength
+                    best_bull_ev = f"CVD {div.divergence_type.value} (強度 {div.strength:.2f})"
             elif div.divergence_type in (DivergenceType.REGULAR_BEARISH, DivergenceType.HIDDEN_BEARISH):
-                bearish = max(bearish, div.strength)
-                evidence.append(f"CVD {div.divergence_type.value} (強度 {div.strength:.2f})")
+                if div.strength > bearish:
+                    bearish = div.strength
+                    best_bear_ev = f"CVD {div.divergence_type.value} (強度 {div.strength:.2f})"
 
+        evidence = [e for e in (best_bull_ev, best_bear_ev) if e]
         return bullish, bearish, evidence
 
     def _score_sfp(self) -> tuple[float, float, list[str]]:
@@ -227,16 +231,20 @@ class TiaBTCOrderFlowStrategy(OrderFlowStrategy):
 
         bullish = 0.0
         bearish = 0.0
-        evidence = []
+        best_bull_ev = ""
+        best_bear_ev = ""
 
         for event in sfp_events:
             if event.direction == SFPDirection.BULLISH:
-                bullish = max(bullish, event.strength)
-                evidence.append(f"SFP 看漲 @ {event.swing_price:.2f} (強度 {event.strength:.2f})")
+                if event.strength > bullish:
+                    bullish = event.strength
+                    best_bull_ev = f"SFP 看漲 @ {event.swing_price:.2f} (強度 {event.strength:.2f})"
             else:
-                bearish = max(bearish, event.strength)
-                evidence.append(f"SFP 看跌 @ {event.swing_price:.2f} (強度 {event.strength:.2f})")
+                if event.strength > bearish:
+                    bearish = event.strength
+                    best_bear_ev = f"SFP 看跌 @ {event.swing_price:.2f} (強度 {event.strength:.2f})"
 
+        evidence = [e for e in (best_bull_ev, best_bear_ev) if e]
         return bullish, bearish, evidence
 
     def _score_absorption(self) -> tuple[float, float, list[str]]:
@@ -258,16 +266,28 @@ class TiaBTCOrderFlowStrategy(OrderFlowStrategy):
 
         bullish = 0.0
         bearish = 0.0
-        evidence = []
+        bull_count = 0
+        bear_count = 0
+        best_bull_ev = ""
+        best_bear_ev = ""
 
         for event in events:
             if event.side == TrappedSide.TRAPPED_SHORTS:
-                bullish = max(bullish, event.strength)
-                evidence.append(f"空方受困 @ {event.trap_price:.2f}")
+                bull_count += 1
+                if event.strength > bullish:
+                    bullish = event.strength
+                    best_bull_ev = f"空方受困 @ {event.trap_price:.2f} (強度 {event.strength:.2f})"
             else:
-                bearish = max(bearish, event.strength)
-                evidence.append(f"多方受困 @ {event.trap_price:.2f}")
+                bear_count += 1
+                if event.strength > bearish:
+                    bearish = event.strength
+                    best_bear_ev = f"多方受困 @ {event.trap_price:.2f} (強度 {event.strength:.2f})"
 
+        evidence = []
+        if best_bull_ev:
+            evidence.append(f"{best_bull_ev}, 共 {bull_count} 次" if bull_count > 1 else best_bull_ev)
+        if best_bear_ev:
+            evidence.append(f"{best_bear_ev}, 共 {bear_count} 次" if bear_count > 1 else best_bear_ev)
         return bullish, bearish, evidence
 
     @staticmethod

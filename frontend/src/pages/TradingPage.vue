@@ -1,75 +1,266 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue'
-import { createChart, type IChartApi, type UTCTimestamp, ColorType, LineSeries } from 'lightweight-charts'
+import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { createChart, createSeriesMarkers, type IChartApi, type UTCTimestamp, ColorType, LineStyle, LineSeries } from 'lightweight-charts'
 import { useBotStore } from '@/stores/bot'
 import { useSupabase } from '@/composables/useSupabase'
-import type { MarketSnapshot } from '@/types'
+import { useChartColors, useTheme } from '@/composables/useTheme'
+import type { Order } from '@/types'
 
 const bot = useBotStore()
 const supabase = useSupabase()
+const { getColors } = useChartColors()
+const { isDark } = useTheme()
 
 const chartContainer = ref<HTMLElement>()
 const selectedSymbol = ref('BTC/USDT')
+const filterMode = ref<'live' | 'paper'>('live')
+const chartInterval = ref('5m')
+const intervalOptions = [
+  { value: '1m', label: '1分', ws: '1m' },
+  { value: '5m', label: '5分', ws: '5m' },
+  { value: '15m', label: '15分', ws: '15m' },
+  { value: '1h', label: '1時', ws: '1h' },
+  { value: '4h', label: '4時', ws: '4h' },
+  { value: '1d', label: '1日', ws: '1d' },
+]
 
 let chart: IChartApi | null = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let lineSeries: any = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let markersPrimitive: any = null
+let ws: WebSocket | null = null
 
+// Order markers state
+const symbolOrders = ref<Order[]>([])
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let priceLines: any[] = []
+
+function getCSSVar(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+}
+
+// BTC/USDT → btcusdt
+function toBinanceWs(pair: string): string {
+  return pair.replace('/', '').toLowerCase()
+}
+
+// BTC/USDT → BTCUSDT
+function toBinanceRest(pair: string): string {
+  return pair.replace('/', '').toUpperCase()
+}
+
+// --- Binance REST: Load kline history ---
 async function loadChartData() {
-  const { data } = await supabase
-    .from('market_snapshots')
-    .select('price, created_at')
-    .eq('symbol', selectedSymbol.value)
-    .order('created_at', { ascending: true })
-    .limit(500)
+  if (!chart || !lineSeries) return
 
-  if (!data || !chart) return
+  const symbol = toBinanceRest(selectedSymbol.value)
+  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${chartInterval.value}&limit=1000`
 
-  const lineData = (data as Array<{ price: number; created_at: string }>).map((d) => ({
-    time: Math.floor(new Date(d.created_at).getTime() / 1000) as UTCTimestamp,
-    value: d.price,
-  }))
+  try {
+    const resp = await fetch(url)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const data = await resp.json()
 
-  if (lineSeries) {
+    const tzOffsetSec = new Date().getTimezoneOffset() * -60
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const lineData = data.map((k: any[]) => ({
+      time: (Math.floor(k[0] / 1000) + tzOffsetSec) as UTCTimestamp,
+      value: parseFloat(k[4]), // close price
+    }))
+
     lineSeries.setData(lineData)
+    chart.timeScale().fitContent()
+  } catch (e) {
+    console.error('Failed to load Binance klines:', e)
   }
+
+  loadOrders()
+  updatePositionLines()
+}
+
+// --- Binance WebSocket: Real-time kline ---
+function connectWebSocket() {
+  if (ws) {
+    ws.close()
+    ws = null
+  }
+
+  const symbol = toBinanceWs(selectedSymbol.value)
+  const wsInterval = intervalOptions.find(o => o.value === chartInterval.value)?.ws ?? '5m'
+  ws = new WebSocket(`wss://stream.binance.com:9443/ws/${symbol}@kline_${wsInterval}`)
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data)
+      const k = msg.k
+      if (k && lineSeries) {
+        const tzOff = new Date().getTimezoneOffset() * -60
+        lineSeries.update({
+          time: (Math.floor(k.t / 1000) + tzOff) as UTCTimestamp,
+          value: parseFloat(k.c),
+        })
+      }
+    } catch { /* ignore parse errors */ }
+  }
+
+  ws.onerror = () => {
+    console.error('Binance WebSocket error')
+  }
+}
+
+// --- Order Markers (v5 createSeriesMarkers) ---
+async function loadOrders() {
+  const { data } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('symbol', selectedSymbol.value)
+    .eq('mode', filterMode.value)
+    .order('created_at', { ascending: true })
+    .limit(50)
+
+  if (data) {
+    symbolOrders.value = data as Order[]
+    applyMarkers()
+  }
+}
+
+function applyMarkers() {
+  if (!lineSeries) return
+
+  const tzOffsetSec = new Date().getTimezoneOffset() * -60
+  const successColor = getCSSVar('--color-success')
+  const dangerColor = getCSSVar('--color-danger')
+
+  const markers = symbolOrders.value.map((o) => {
+    const isBuy = o.side === 'buy'
+    return {
+      time: (Math.floor(new Date(o.created_at).getTime() / 1000) + tzOffsetSec) as UTCTimestamp,
+      position: isBuy ? 'belowBar' as const : 'aboveBar' as const,
+      color: isBuy ? successColor : dangerColor,
+      shape: isBuy ? 'arrowUp' as const : 'arrowDown' as const,
+      text: isBuy ? `買 $${o.price}` : `賣 $${o.price}`,
+    }
+  })
+
+  markers.sort((a, b) => (a.time as number) - (b.time as number))
+
+  if (markersPrimitive) {
+    markersPrimitive.setMarkers(markers)
+  } else {
+    markersPrimitive = createSeriesMarkers(lineSeries, markers)
+  }
+}
+
+// --- Position Price Lines ---
+function updatePositionLines() {
+  if (!lineSeries) return
+
+  for (const pl of priceLines) {
+    lineSeries.removePriceLine(pl)
+  }
+  priceLines = []
+
+  const pos = bot.positions.find((p) => p.symbol === selectedSymbol.value && (p.mode ?? 'live') === filterMode.value)
+  if (!pos) return
+
+  const accentColor = getCSSVar('--color-accent')
+  const dangerColor = getCSSVar('--color-danger')
+  const successColor = getCSSVar('--color-success')
+
+  priceLines.push(
+    lineSeries.createPriceLine({
+      price: pos.entry_price,
+      color: accentColor,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: `入場 $${pos.entry_price}`,
+    }),
+  )
+
+  if (pos.stop_loss) {
+    priceLines.push(
+      lineSeries.createPriceLine({
+        price: pos.stop_loss,
+        color: dangerColor,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `SL $${pos.stop_loss}`,
+      }),
+    )
+  }
+
+  if (pos.take_profit) {
+    priceLines.push(
+      lineSeries.createPriceLine({
+        price: pos.take_profit,
+        color: successColor,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `TP $${pos.take_profit}`,
+      }),
+    )
+  }
+}
+
+function applyChartTheme() {
+  if (!chart || !lineSeries) return
+  const c = getColors()
+  chart.applyOptions({
+    layout: {
+      background: { type: ColorType.Solid, color: c.bg },
+      textColor: c.text,
+    },
+    grid: {
+      vertLines: { color: c.grid },
+      horzLines: { color: c.grid },
+    },
+  })
+  lineSeries.applyOptions({ color: c.line })
+  updatePositionLines()
 }
 
 onMounted(() => {
   if (!chartContainer.value) return
 
+  const c = getColors()
   chart = createChart(chartContainer.value, {
     width: chartContainer.value.clientWidth,
     height: window.innerWidth < 768 ? 250 : 400,
     layout: {
-      background: { type: ColorType.Solid, color: '#1a2332' },
-      textColor: '#94a3b8',
+      background: { type: ColorType.Solid, color: c.bg },
+      textColor: c.text,
     },
     grid: {
-      vertLines: { color: '#2d3748' },
-      horzLines: { color: '#2d3748' },
+      vertLines: { color: c.grid },
+      horzLines: { color: c.grid },
     },
-    crosshair: {
-      mode: 0,
+    crosshair: { mode: 0 },
+    timeScale: {
+      timeVisible: true,
+      secondsVisible: false,
     },
   })
 
   lineSeries = chart.addSeries(LineSeries, {
-    color: '#3b82f6',
+    color: c.line,
     lineWidth: 2,
   })
 
   loadChartData()
+  connectWebSocket()
 
-  const channel = supabase
-    .channel('chart:snapshots')
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'market_snapshots' }, (p) => {
-      const snap = p.new as MarketSnapshot
-      if (snap.symbol === selectedSymbol.value && lineSeries) {
-        lineSeries.update({
-          time: Math.floor(new Date(snap.created_at).getTime() / 1000) as UTCTimestamp,
-          value: snap.price,
-        })
+  // Realtime: new orders → add marker
+  const orderChannel = supabase
+    .channel('chart:orders')
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' }, (p) => {
+      const newOrder = p.new as Order
+      if (newOrder.symbol === selectedSymbol.value && (newOrder.mode ?? 'live') === filterMode.value) {
+        symbolOrders.value.push(newOrder)
+        applyMarkers()
       }
     })
     .subscribe()
@@ -85,91 +276,89 @@ onMounted(() => {
   resizeObserver.observe(chartContainer.value)
 
   onUnmounted(() => {
-    supabase.removeChannel(channel)
+    if (ws) { ws.close(); ws = null }
+    supabase.removeChannel(orderChannel)
     resizeObserver.disconnect()
     chart?.remove()
   })
 })
 
-watch(selectedSymbol, () => loadChartData())
+// Symbol or interval change → reload chart + reconnect WS
+watch([selectedSymbol, chartInterval], () => {
+  if (markersPrimitive) {
+    markersPrimitive.detach()
+    markersPrimitive = null
+  }
+  loadChartData()
+  connectWebSocket()
+})
+
+// Mode change → reload orders + position lines
+watch(filterMode, () => {
+  if (markersPrimitive) {
+    markersPrimitive.detach()
+    markersPrimitive = null
+  }
+  loadOrders()
+  updatePositionLines()
+})
+
+watch(() => bot.positions, () => updatePositionLines(), { deep: true })
+
+watch(isDark, async () => {
+  await nextTick()
+  applyChartTheme()
+})
 </script>
 
 <template>
   <div class="p-4 md:p-6 space-y-4 md:space-y-6">
-    <div class="flex items-center justify-between">
-      <h2 class="text-xl md:text-2xl font-bold">交易</h2>
-      <select
-        v-model="selectedSymbol"
-        class="bg-(--color-bg-card) border border-(--color-border) rounded-lg px-3 py-1.5 text-sm"
-      >
-        <option v-for="pair in bot.status?.pairs ?? ['BTC/USDT', 'ETH/USDT']" :key="pair">
-          {{ pair }}
-        </option>
-      </select>
+    <div class="flex items-center justify-between gap-2">
+      <h2 class="text-2xl md:text-3xl font-bold">交易</h2>
+      <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
+        <button
+          class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
+          :class="filterMode === 'live'
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="filterMode = 'live'"
+        >Live</button>
+        <button
+          class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
+          :class="filterMode === 'paper'
+            ? 'bg-(--color-bg-card) text-(--color-accent) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="filterMode = 'paper'"
+        >Paper</button>
+      </div>
     </div>
 
-    <!-- Chart -->
-    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2 md:p-4">
+    <!-- Chart: Binance live kline -->
+    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2 md:p-4 shadow-sm dark:shadow-none">
+      <div class="flex gap-1 mb-2">
+        <button
+          v-for="opt in intervalOptions"
+          :key="opt.value"
+          class="px-2.5 py-1 rounded text-xs font-medium transition-colors"
+          :class="chartInterval === opt.value
+            ? 'bg-(--color-accent) text-white'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary) hover:bg-(--color-bg-secondary)'"
+          @click="chartInterval = opt.value"
+        >{{ opt.label }}</button>
+      </div>
       <div ref="chartContainer" class="w-full" />
     </div>
 
-    <!-- Positions: card layout on mobile, table on desktop -->
-    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4">
-      <h3 class="text-sm font-semibold text-(--color-text-secondary) uppercase mb-3">持倉中</h3>
-
-      <!-- Desktop table -->
-      <div class="hidden md:block table-responsive">
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="text-(--color-text-secondary) text-left">
-              <th class="pb-2">交易對</th>
-              <th class="pb-2">數量</th>
-              <th class="pb-2">進場價</th>
-              <th class="pb-2">現價</th>
-              <th class="pb-2">損益</th>
-              <th class="pb-2">停損 / 停利</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="pos in bot.positions" :key="pos.symbol" class="border-t border-(--color-border)">
-              <td class="py-2 font-medium">{{ pos.symbol }}</td>
-              <td>{{ pos.quantity.toFixed(6) }}</td>
-              <td>${{ pos.entry_price.toFixed(2) }}</td>
-              <td>${{ (bot.latestPrices[pos.symbol] ?? pos.current_price).toFixed(2) }}</td>
-              <td :class="pos.unrealized_pnl >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'">
-                {{ pos.unrealized_pnl >= 0 ? '+' : '' }}{{ pos.unrealized_pnl.toFixed(2) }}
-              </td>
-              <td class="text-(--color-text-secondary)">
-                {{ pos.stop_loss?.toFixed(2) ?? '-' }} / {{ pos.take_profit?.toFixed(2) ?? '-' }}
-              </td>
-            </tr>
-            <tr v-if="!bot.positions.length">
-              <td colspan="6" class="py-4 text-center text-(--color-text-secondary)">尚無持倉</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Mobile cards -->
-      <div class="md:hidden space-y-3">
-        <div v-for="pos in bot.positions" :key="pos.symbol"
-             class="bg-(--color-bg-secondary) rounded-lg p-3">
-          <div class="flex justify-between items-center mb-2">
-            <span class="font-bold">{{ pos.symbol }}</span>
-            <span :class="pos.unrealized_pnl >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'" class="font-bold">
-              {{ pos.unrealized_pnl >= 0 ? '+' : '' }}{{ pos.unrealized_pnl.toFixed(2) }} USDT
-            </span>
-          </div>
-          <div class="grid grid-cols-2 gap-2 text-xs text-(--color-text-secondary)">
-            <div>數量: {{ pos.quantity.toFixed(6) }}</div>
-            <div>進場: ${{ pos.entry_price.toFixed(2) }}</div>
-            <div>現價: ${{ (bot.latestPrices[pos.symbol] ?? pos.current_price).toFixed(2) }}</div>
-            <div>SL/TP: {{ pos.stop_loss?.toFixed(0) ?? '-' }} / {{ pos.take_profit?.toFixed(0) ?? '-' }}</div>
-          </div>
-        </div>
-        <div v-if="!bot.positions.length" class="text-center text-sm text-(--color-text-secondary) py-4">
-          尚無持倉
-        </div>
+    <!-- Price Cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div v-for="(price, symbol) in bot.latestPrices" :key="symbol"
+           class="bg-(--color-bg-card) border rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none cursor-pointer transition-colors"
+           :class="selectedSymbol === symbol
+             ? 'border-(--color-accent) ring-1 ring-(--color-accent)/30'
+             : 'border-(--color-border) hover:border-(--color-accent)/50'"
+           @click="selectedSymbol = symbol as string">
+        <div class="text-sm uppercase" :class="selectedSymbol === symbol ? 'text-(--color-accent)' : 'text-(--color-text-secondary)'">{{ symbol }}</div>
+        <div class="text-xl md:text-2xl font-bold font-mono mt-1">{{ price }}</div>
       </div>
     </div>
   </div>

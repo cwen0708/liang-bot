@@ -22,10 +22,10 @@ strategy:
 
 # Risk Management
 risk:
-  max_position_pct: 0.02     # 每筆交易最大部位：總資金 2%
+  max_position_pct: 0.04     # 每筆交易最大部位：總資金 4%
   stop_loss_pct: 0.03        # 停損 3%
   take_profit_pct: 0.06      # 停利 6%（風報比 2:1）
-  max_open_positions: 3      # 最大同時持倉數
+  max_open_positions: 8      # 最大同時持倉數
   max_daily_loss_pct: 0.05   # 每日虧損超過 5% 暫停交易
 
 # Backtest
@@ -46,13 +46,32 @@ orderflow:
   absorption_lookback: 10
   signal_threshold: 0.5
 
-# Multi-Strategy
+# Multi-Strategy（interval_n: 每 N 輪執行一次，1=每輪，60=每小時）
 strategies:
   - name: "sma_crossover"
+    interval_n: 60
     params:
       fast_period: 10
       slow_period: 30
+  - name: "rsi_oversold"
+    interval_n: 60
+    params:
+      period: 14
+      oversold: 30
+      overbought: 70
+  - name: "bollinger_breakout"
+    interval_n: 60
+    params:
+      period: 20
+      std_dev: 2.0
+  - name: "macd_momentum"
+    interval_n: 60
+    params:
+      fast_period: 12
+      slow_period: 26
+      signal_period: 9
   - name: "tia_orderflow"
+    interval_n: 1
     params:
       signal_threshold: 0.5
 
@@ -63,15 +82,11 @@ llm:
   model: "claude-sonnet-4-5-20250929"
   timeout: 60
   min_confidence: 0.3           # 至少一個策略信心 >= 此值才呼叫 LLM
-  fallback: "weighted_vote"
-  fallback_weights:
-    sma_crossover: 0.3
-    tia_orderflow: 0.7
 
 # Loan Guard（借貸再平衡）
 loan_guard:
   enabled: true
-  target_ltv: 0.65            # 目標平衡 LTV
+  target_ltv: 0.70            # 目標平衡 LTV（>= 此值才 warning）
   danger_ltv: 0.75            # 高於此 → 買入質押物（低買）
   low_ltv: 0.40               # 低於此 → 減少質押賣出（高賣）
   dry_run: false              # true=只告警, false=AI審核通過後實際執行

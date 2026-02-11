@@ -1,0 +1,37 @@
+{
+  "orders": [
+    {
+      "id": "paper_1770722434013",
+      "symbol": "BTC/USDT",
+      "side": "buy",
+      "type": "market",
+      "amount": 3.725068514912103e-05,
+      "price": 68992.27,
+      "filled": 3.725068514912103e-05,
+      "status": "closed",
+      "timestamp": 1770722434013
+    },
+    {
+      "id": "paper_1770722482067",
+      "symbol": "BNB/USDT",
+      "side": "buy",
+      "type": "market",
+      "amount": 0.004088726135929745,
+      "price": 628.34,
+      "filled": 0.004088726135929745,
+      "status": "closed",
+      "timestamp": 1770722482067
+    },
+    {
+      "id": "paper_1770729327014",
+      "symbol": "ETH/USDT",
+      "side": "buy",
+      "type": "market",
+      "amount": 0.0012777853627007408,
+      "price": 2010.11,
+      "filled": 0.0012777853627007408,
+      "status": "closed",
+      "timestamp": 1770729327014
+    }
+  ]
+}

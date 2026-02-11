@@ -1,24 +1,129 @@
 @import "tailwindcss";
 
-/* Dark trading terminal theme */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Global font size baseline */
+html {
+  font-size: 17px;
+}
+
+/* Register theme variable names with initial values (TW v4 requirement) */
 @theme {
-  --color-bg-primary: #0a0e17;
-  --color-bg-secondary: #111827;
-  --color-bg-card: #1a2332;
-  --color-border: #2d3748;
-  --color-text-primary: #e2e8f0;
-  --color-text-secondary: #94a3b8;
-  --color-accent: #3b82f6;
-  --color-success: #10b981;
-  --color-danger: #ef4444;
-  --color-warning: #f59e0b;
+  --color-bg-primary: initial;
+  --color-bg-secondary: initial;
+  --color-bg-card: initial;
+  --color-bg-elevated: initial;
+  --color-border: initial;
+  --color-border-subtle: initial;
+  --color-text-primary: initial;
+  --color-text-secondary: initial;
+  --color-text-muted: initial;
+  --color-accent: initial;
+  --color-accent-hover: initial;
+  --color-accent-subtle: initial;
+  --color-success: initial;
+  --color-success-subtle: initial;
+  --color-danger: initial;
+  --color-danger-subtle: initial;
+  --color-warning: initial;
+  --color-warning-subtle: initial;
+  --color-chart-bg: initial;
+  --color-chart-text: initial;
+  --color-chart-grid: initial;
+  --color-chart-line: initial;
+  --color-chart-baseline-top: initial;
+  --color-chart-baseline-top-fill1: initial;
+  --color-chart-baseline-top-fill2: initial;
+  --color-chart-baseline-bottom: initial;
+  --color-chart-baseline-bottom-fill1: initial;
+  --color-chart-baseline-bottom-fill2: initial;
+  --color-chart-priceline-low: initial;
+  --color-chart-priceline-high: initial;
+  --font-sans: 'DM Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;
+}
+
+/* Light theme (default root) */
+:root {
+  --color-bg-primary: #f5f6fa;
+  --color-bg-secondary: #eceef5;
+  --color-bg-card: #ffffff;
+  --color-bg-elevated: #f0f1f7;
+  --color-border: #d5d9e2;
+  --color-border-subtle: #e8ebf0;
+  --color-text-primary: #1a1d26;
+  --color-text-secondary: #5c6272;
+  --color-text-muted: #8c91a0;
+  --color-accent: #c27d1a;
+  --color-accent-hover: #d98e2a;
+  --color-accent-subtle: rgba(194, 125, 26, 0.08);
+  --color-success: #0d9373;
+  --color-success-subtle: rgba(13, 147, 115, 0.08);
+  --color-danger: #d04040;
+  --color-danger-subtle: rgba(208, 64, 64, 0.08);
+  --color-warning: #c48a10;
+  --color-warning-subtle: rgba(196, 138, 16, 0.08);
+  --color-chart-bg: #ffffff;
+  --color-chart-text: #5c6272;
+  --color-chart-grid: #e8ebf0;
+  --color-chart-line: #c27d1a;
+  --color-chart-baseline-top: rgba(208, 64, 64, 0.8);
+  --color-chart-baseline-top-fill1: rgba(208, 64, 64, 0.12);
+  --color-chart-baseline-top-fill2: rgba(208, 64, 64, 0.02);
+  --color-chart-baseline-bottom: rgba(13, 147, 115, 0.8);
+  --color-chart-baseline-bottom-fill1: rgba(13, 147, 115, 0.02);
+  --color-chart-baseline-bottom-fill2: rgba(13, 147, 115, 0.12);
+  --color-chart-priceline-low: rgba(13, 147, 115, 0.4);
+  --color-chart-priceline-high: rgba(208, 64, 64, 0.4);
+}
+
+/* Dark theme */
+:root.dark {
+  --color-bg-primary: #0c0f16;
+  --color-bg-secondary: #141820;
+  --color-bg-card: #1a1f2e;
+  --color-bg-elevated: #222838;
+  --color-border: #2a3142;
+  --color-border-subtle: #1e2433;
+  --color-text-primary: #f0f0f5;
+  --color-text-secondary: #8b95a8;
+  --color-text-muted: #5c6578;
+  --color-accent: #e5a33d;
+  --color-accent-hover: #f0b554;
+  --color-accent-subtle: rgba(229, 163, 61, 0.12);
+  --color-success: #2dd4a8;
+  --color-success-subtle: rgba(45, 212, 168, 0.12);
+  --color-danger: #f06060;
+  --color-danger-subtle: rgba(240, 96, 96, 0.12);
+  --color-warning: #f5b731;
+  --color-warning-subtle: rgba(245, 183, 49, 0.12);
+  --color-chart-bg: #1a1f2e;
+  --color-chart-text: #8b95a8;
+  --color-chart-grid: #2a3142;
+  --color-chart-line: #e5a33d;
+  --color-chart-baseline-top: rgba(240, 96, 96, 0.8);
+  --color-chart-baseline-top-fill1: rgba(240, 96, 96, 0.15);
+  --color-chart-baseline-top-fill2: rgba(240, 96, 96, 0.02);
+  --color-chart-baseline-bottom: rgba(45, 212, 168, 0.8);
+  --color-chart-baseline-bottom-fill1: rgba(45, 212, 168, 0.02);
+  --color-chart-baseline-bottom-fill2: rgba(45, 212, 168, 0.15);
+  --color-chart-priceline-low: rgba(45, 212, 168, 0.4);
+  --color-chart-priceline-high: rgba(240, 96, 96, 0.4);
+}
+
+/* Theme transition */
+html,
+html *,
+html *::before,
+html *::after {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.15s ease;
 }
 
 body {
   margin: 0;
   background-color: var(--color-bg-primary);
   color: var(--color-text-primary);
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -41,4 +146,34 @@ body {
 /* Hide scrollbar on mobile tab bar */
 nav::-webkit-scrollbar {
   display: none;
+}
+
+/* Minimal scrollbar: thin thumb only, no track/arrows */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+::-webkit-scrollbar-button {
+  display: none;
+}
+
+/* Hide lightweight-charts TradingView logo */
+[class*="tv-lightweight-charts"] a[href*="tradingview.com"] {
+  display: none !important;
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
 }

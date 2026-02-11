@@ -79,11 +79,6 @@ class LLMConfig:
     model: str = "claude-sonnet-4-5-20250929"
     timeout: int = 60
     min_confidence: float = 0.3
-    fallback: str = "weighted_vote"
-    fallback_weights: dict = field(default_factory=lambda: {
-        "sma_crossover": 0.3,
-        "tia_orderflow": 0.7,
-    })
 
 
 @dataclass(frozen=True)
@@ -98,9 +93,9 @@ class LoanGuardConfig:
 
 @dataclass(frozen=True)
 class StrategiesConfig:
-    """多策略配置。"""
+    """多策略配置。每個策略可設 interval_n 控制執行頻率。"""
     strategies: list[dict] = field(default_factory=lambda: [
-        {"name": "sma_crossover", "params": {"fast_period": 10, "slow_period": 30}},
+        {"name": "sma_crossover", "interval_n": 60, "params": {"fast_period": 10, "slow_period": 30}},
     ])
 
 
@@ -260,11 +255,6 @@ class Settings:
             model=cfg.get("model", "claude-sonnet-4-5-20250929"),
             timeout=cfg.get("timeout", 60),
             min_confidence=cfg.get("min_confidence", 0.3),
-            fallback=cfg.get("fallback", "weighted_vote"),
-            fallback_weights=cfg.get("fallback_weights", {
-                "sma_crossover": 0.3,
-                "tia_orderflow": 0.7,
-            }),
         )
 
     @staticmethod

@@ -5,13 +5,13 @@
 
 import signal
 import time
+import uuid
 from datetime import datetime, timezone
 
 from bot.config.settings import LoanGuardConfig, Settings
 from bot.db.supabase_client import SupabaseWriter
 from bot.data.bar_aggregator import BarAggregator
 from bot.data.fetcher import DataFetcher
-from bot.data.models import AggTrade
 from bot.exchange.binance_client import BinanceClient
 from bot.execution.executor import OrderExecutor
 from bot.execution.order_manager import OrderManager
@@ -20,9 +20,13 @@ from bot.llm.schemas import PortfolioState, PositionInfo
 from bot.logging_config import get_logger
 from bot.logging_config.logger import attach_supabase_handler, setup_logging
 from bot.risk.manager import RiskManager
-from bot.strategy.base import BaseStrategy, OrderFlowStrategy
+from bot.config.constants import DataFeedType
+from bot.strategy.base import BaseStrategy, Strategy
 from bot.strategy.router import StrategyRouter
 from bot.strategy.signals import Signal, StrategyVerdict
+from bot.strategy.bollinger_breakout import BollingerBreakoutStrategy
+from bot.strategy.macd_momentum import MACDMomentumStrategy
+from bot.strategy.rsi_oversold import RSIOversoldStrategy
 from bot.strategy.sma_crossover import SMACrossoverStrategy
 from bot.strategy.tia_orderflow import TiaBTCOrderFlowStrategy
 
@@ -36,6 +40,9 @@ _L3 = "      "    # Level 3: sub-detail
 # OHLCV 策略註冊表
 OHLCV_STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "sma_crossover": SMACrossoverStrategy,
+    "rsi_oversold": RSIOversoldStrategy,
+    "bollinger_breakout": BollingerBreakoutStrategy,
+    "macd_momentum": MACDMomentumStrategy,
 }
 
 
@@ -64,20 +71,20 @@ class TradingBot:
         self.exchange = BinanceClient(self.settings.exchange)
         self.data_fetcher = DataFetcher(self.exchange)
 
-        # 初始化 OHLCV 策略
-        self.ohlcv_strategies: list[BaseStrategy] = []
-        # 初始化訂單流策略
-        self.of_strategies: list[OrderFlowStrategy] = []
+        # 統一策略清單（OHLCV + 訂單流共用）
+        self.strategies: list[Strategy] = []
         self._create_all_strategies()
+        self._strategy_fingerprint = self._get_strategy_fingerprint()
+
+        # 訂單流快取載入追蹤
+        self._cache_loaded: set[str] = set()
 
         self.risk_manager = RiskManager(self.settings.risk)
         self.executor = OrderExecutor(self.exchange, self.settings.trading.mode)
         self.order_manager = OrderManager()
 
         # 策略路由器
-        self.router = StrategyRouter(
-            fallback_weights=self.settings.llm.fallback_weights,
-        )
+        self.router = StrategyRouter()
 
         # LLM 決策引擎
         self.llm_engine = LLMDecisionEngine(self.settings.llm)
@@ -96,29 +103,32 @@ class TradingBot:
         # 記錄每個交易對最後處理的 trade ID（避免重複餵入）
         self._last_trade_id: dict[str, int] = {}
 
-        # 記錄每個交易對最後一根 K 線的時間戳（避免小時線未更新時重複計算 OHLCV 策略）
-        self._last_candle_time: dict[str, object] = {}
-
         # 借貸去重：記錄每個交易對上次寫入的 LTV，相同就跳過
         self._last_ltv: dict[str, float] = {}
+
+        # 策略 slot 防重複：記錄每個策略上次執行的時間段 slot
+        self._last_strategy_slot: dict[str, int] = {}
 
         self._running = False
         self._start_time: float = 0.0
         self._config_version: int = 0
 
     def _create_all_strategies(self) -> None:
-        """根據 config 建立所有策略（OHLCV + 訂單流）。"""
+        """根據 config 建立所有策略（OHLCV + 訂單流），統一存入 self.strategies。"""
+        self.strategies.clear()
+
         for strat_cfg in self.settings.strategies_config.strategies:
             name = strat_cfg.get("name", "")
             params = strat_cfg.get("params", {})
+            interval_n = strat_cfg.get("interval_n", 60)
 
             if name in OHLCV_STRATEGY_REGISTRY:
-                strategy = OHLCV_STRATEGY_REGISTRY[name](params)
-                self.ohlcv_strategies.append(strategy)
-                logger.info("載入 OHLCV 策略: %s", name)
+                params["_interval_n"] = interval_n
+                self.strategies.append(OHLCV_STRATEGY_REGISTRY[name](params))
+                logger.info("載入策略: %s (interval_n=%d)", name, interval_n)
             elif name == "tia_orderflow":
-                # 合併 orderflow config 參數
                 of_params = {
+                    "_interval_n": interval_n,
                     "bar_interval_seconds": self.settings.orderflow.bar_interval_seconds,
                     "tick_size": self.settings.orderflow.tick_size,
                     "cvd_lookback": self.settings.orderflow.cvd_lookback,
@@ -129,33 +139,34 @@ class TradingBot:
                     "signal_threshold": self.settings.orderflow.signal_threshold,
                     **params,
                 }
-                of_strategy = TiaBTCOrderFlowStrategy(of_params)
-                self.of_strategies.append(of_strategy)
-                logger.info("載入訂單流策略: %s", name)
+                self.strategies.append(TiaBTCOrderFlowStrategy(of_params))
+                logger.info("載入策略: %s (interval_n=%d)", name, interval_n)
             else:
                 logger.warning("未知策略: %s，跳過", name)
 
-        # 至少保留一個 OHLCV 策略
-        if not self.ohlcv_strategies:
-            self.ohlcv_strategies.append(SMACrossoverStrategy(self.settings.strategy.params))
+        if not self.strategies:
+            params = {**self.settings.strategy.params, "_interval_n": 60}
+            self.strategies.append(SMACrossoverStrategy(params))
             logger.info("使用預設 sma_crossover 策略")
+
+    def _get_strategy_fingerprint(self) -> str:
+        """取得目前策略配置的指紋（用於偵測變更）。"""
+        configs = self.settings.strategies_config.strategies
+        return str(sorted((c.get("name"), c.get("interval_n"), str(c.get("params"))) for c in configs))
 
     def run(self) -> None:
         """啟動交易迴圈（持續運行）。"""
         self._running = True
         signal.signal(signal.SIGINT, self._shutdown)
 
-        all_names = (
-            [s.name for s in self.ohlcv_strategies]
-            + [s.name for s in self.of_strategies]
-        )
+        all_names = [s.name for s in self.strategies]
         lg = self.settings.loan_guard
         logger.info(
             "啟動交易: 交易對=%s, 時間框架=%s, 策略=%s, LLM=%s, 借款監控=%s",
             self.settings.trading.pairs,
             self.settings.trading.timeframe,
             all_names,
-            "啟用" if self.llm_engine.enabled else "停用（加權投票）",
+            "啟用" if self.llm_engine.enabled else "停用",
             f"啟用 (低買>{lg.danger_ltv:.0%}, 高賣<{lg.low_ltv:.0%}, 目標={lg.target_ltv:.0%}{', 模擬' if lg.dry_run else ''})"
             if lg.enabled else "停用",
         )
@@ -164,7 +175,8 @@ class TradingBot:
         cycle = 0
         while self._running:
             cycle += 1
-            logger.info("═══ 第 %d 輪分析開始 ═══", cycle)
+            cycle_id = f"c{cycle}-{uuid.uuid4().hex[:8]}"
+            logger.info("═══ 第 %d 輪分析開始 (%s) ═══", cycle, cycle_id)
 
             # 從 Supabase 載入最新配置（若版本已變更）
             new_cfg = self._db.load_config()
@@ -173,12 +185,23 @@ class TradingBot:
                     self.settings = Settings.from_dict(new_cfg, self.settings)
                     self._config_version = self._db._last_config_version
                     logger.info("已套用 Supabase 新配置 (version=%d)", self._config_version)
+
+                    # 策略熱重載：偵測策略清單或參數變更
+                    new_fp = self._get_strategy_fingerprint()
+                    if new_fp != self._strategy_fingerprint:
+                        old_names = [s.name for s in self.strategies]
+                        self._create_all_strategies()
+                        self._cache_loaded.clear()  # 訂單流快取需重新載入
+                        self._last_strategy_slot.clear()  # 重置 slot 讓新策略立即執行
+                        self._strategy_fingerprint = new_fp
+                        new_names = [s.name for s in self.strategies]
+                        logger.info("策略熱重載: %s → %s", old_names, new_names)
                 except Exception as e:
                     logger.error("套用 Supabase 配置失敗: %s（保留舊配置）", e)
 
             for symbol in self.settings.trading.pairs:
                 try:
-                    self._process_symbol(symbol)
+                    self._process_symbol(symbol, cycle_id, cycle)
                 except Exception:
                     logger.exception("%s處理時發生錯誤", _L1)
 
@@ -196,6 +219,25 @@ class TradingBot:
                     self._check_loan_health()
                 except Exception:
                     logger.exception("%s借款監控發生錯誤", _L1)
+
+            # 寫入帳戶餘額快照
+            try:
+                bal = self.exchange.get_balance()
+                usdt_vals: dict[str, float | None] = {}
+                for cur, amt in bal.items():
+                    base = cur[2:] if cur.startswith("LD") else cur
+                    if base in ("USDT", "USDC", "BUSD", "FDUSD"):
+                        usdt_vals[cur] = amt
+                    else:
+                        try:
+                            tk = self.exchange.get_ticker(f"{base}/USDT")
+                            usdt_vals[cur] = amt * tk["last"]
+                        except Exception:
+                            usdt_vals[cur] = None
+                snap_id = f"cycle-{cycle}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+                self._db.insert_balances(bal, usdt_vals, snap_id)
+            except Exception:
+                logger.debug("寫入帳戶餘額快照失敗", exc_info=True)
 
             # 更新 Supabase 心跳 + flush 日誌
             uptime = int(time.monotonic() - self._start_time)
@@ -215,12 +257,13 @@ class TradingBot:
                 )
                 time.sleep(self.settings.trading.check_interval_seconds)
 
-    def _process_symbol(self, symbol: str) -> None:
+    def _process_symbol(self, symbol: str, cycle_id: str = "", cycle: int = 1) -> None:
         """
         處理單一交易對：收集所有策略結論 → LLM/加權投票 → 執行。
         """
         # ── 1. 抓取 K 線 ──
-        max_required = max((s.required_candles for s in self.ohlcv_strategies), default=50)
+        ohlcv_strategies = [s for s in self.strategies if s.data_feed_type == DataFeedType.OHLCV]
+        max_required = max((s.required_candles for s in ohlcv_strategies), default=50)
         df = self.data_fetcher.fetch_ohlcv(
             symbol,
             timeframe=self.settings.trading.timeframe,
@@ -249,35 +292,73 @@ class TradingBot:
                 self._execute_sell(symbol, current_price)
                 return
 
-        # ── 3. 收集所有策略結論 ──
+        # ── 3a. 訂單流：每輪都收集資料（確保 bar 不遺失） ──
+        for strategy in self.strategies:
+            if strategy.data_feed_type != DataFeedType.ORDER_FLOW:
+                continue
+            try:
+                if symbol not in self._cache_loaded:
+                    strategy.load_cache(symbol)
+                    self._cache_loaded.add(symbol)
+
+                raw_trades = self.exchange.fetch_agg_trades(symbol, limit=1000)
+                if raw_trades:
+                    agg = self._aggregators.setdefault(
+                        symbol,
+                        BarAggregator(
+                            interval_seconds=self.settings.orderflow.bar_interval_seconds,
+                            tick_size=self.settings.orderflow.tick_size,
+                        ),
+                    )
+                    _, new_id = strategy.feed_trades(
+                        symbol, raw_trades, agg,
+                        self._last_trade_id.get(symbol, 0),
+                    )
+                    if new_id > 0:
+                        self._last_trade_id[symbol] = new_id
+            except Exception:
+                logger.exception("%s[%s] 訂單流資料收集失敗", _L2, strategy.name)
+
+        # ── 3b. 收集本輪應執行的策略結論 ──
+        #   interval_n 用時間 slot：minutes_since_midnight // interval_n
+        #   同一 slot 內只執行一次，避免重複；slot 變化即觸發，不怕錯過整點
+        #   例如 interval_n=1 每分鐘、60 每小時、240 每 4 小時、1440 每天
         self.router.clear()
+        now = datetime.now(timezone.utc)
+        minutes_since_midnight = now.hour * 60 + now.minute
 
-        # 3a. OHLCV 策略（只在新 K 線出現時重新計算）
-        latest_candle_time = df["timestamp"].iloc[-1]
-        ohlcv_changed = (self._last_candle_time.get(symbol) != latest_candle_time)
-
-        if ohlcv_changed:
-            self._last_candle_time[symbol] = latest_candle_time
-            for strategy in self.ohlcv_strategies:
-                if len(df) < strategy.required_candles:
+        for strategy in self.strategies:
+            if strategy.interval_n > 0:
+                slot = minutes_since_midnight // strategy.interval_n
+                last_slot = self._last_strategy_slot.get(strategy.name, -1)
+                if slot == last_slot:
                     continue
-                verdict = strategy.generate_verdict(df)
+                self._last_strategy_slot[strategy.name] = slot
+
+            verdict = None
+            try:
+                if strategy.data_feed_type == DataFeedType.OHLCV:
+                    if len(df) < strategy.required_candles:
+                        continue
+                    verdict = strategy.generate_verdict(df)
+
+                else:  # ORDER_FLOW — 資料已在 3a 收集，這裡只取結論
+                    verdict = strategy.latest_verdict(symbol)
+            except Exception:
+                logger.exception("%s[%s] 策略執行失敗", _L2, strategy.name)
+                continue
+
+            if verdict is not None:
                 self.router.collect(verdict)
                 self._db.insert_verdict(
                     symbol, strategy.name, verdict.signal.value,
-                    verdict.confidence, verdict.reasoning,
+                    verdict.confidence, verdict.reasoning, cycle_id,
                 )
                 logger.info(
                     "%s[%s] %s (信心 %.2f) — %s",
                     _L2, strategy.name, verdict.signal.value,
                     verdict.confidence, verdict.reasoning[:80],
                 )
-        else:
-            logger.info("%sOHLCV 無新 K 線，跳過 (%s)", _L2, self.settings.trading.timeframe)
-
-        # 3b. 訂單流策略（每輪都執行，aggTrade 持續更新）
-        if self.of_strategies:
-            self._collect_orderflow_verdicts(symbol)
 
         verdicts = self.router.get_verdicts()
         if not verdicts:
@@ -286,11 +367,20 @@ class TradingBot:
 
         # ── 4. LLM 決策 或 加權投票 ──
         final_signal, final_confidence = self._make_decision(
-            verdicts, symbol, current_price
+            verdicts, symbol, current_price, cycle_id
         )
 
         if final_signal == Signal.HOLD:
             logger.info("%s→ HOLD（不動作）", _L2)
+            return
+
+        # 信心度門檻：低於 min_confidence 視為 HOLD
+        min_conf = self.settings.llm.min_confidence
+        if final_confidence < min_conf:
+            logger.info(
+                "%s→ %s 信心 %.2f 低於門檻 %.2f → 視為 HOLD",
+                _L2, final_signal.value, final_confidence, min_conf,
+            )
             return
 
         logger.info(
@@ -303,6 +393,21 @@ class TradingBot:
             try:
                 balance = self.exchange.get_balance()
                 usdt_balance = balance.get("USDT", 0.0)
+
+                # 若 USDT 不足但有 Earn 持倉（LDUSDT），自動贖回
+                if usdt_balance < 1.0 and balance.get("LDUSDT", 0.0) > 0:
+                    logger.info(
+                        "%sUSDT 餘額不足 (%.2f)，偵測到 LDUSDT %.2f，嘗試自動贖回...",
+                        _L2, usdt_balance, balance["LDUSDT"],
+                    )
+                    redeemed = self.exchange.redeem_all_usdt_earn()
+                    if redeemed > 0:
+                        logger.info("%s已贖回 %.4f USDT，重新取得餘額", _L2, redeemed)
+                        time.sleep(1)  # 等待贖回到帳
+                        balance = self.exchange.get_balance()
+                        usdt_balance = balance.get("USDT", 0.0)
+                    else:
+                        logger.warning("%s贖回失敗或無可贖回", _L2)
             except Exception as e:
                 logger.warning("%s取得餘額失敗，跳過買入: %s", _L2, e)
                 return
@@ -313,111 +418,25 @@ class TradingBot:
             if not risk_output.approved:
                 logger.info("%s風控拒絕: %s", _L2, risk_output.reason)
                 return
-            self._execute_buy(symbol, current_price, risk_output)
+            self._execute_buy(symbol, current_price, risk_output, cycle_id)
 
         elif final_signal == Signal.SELL:
-            self._execute_sell(symbol, current_price)
-
-    def _collect_orderflow_verdicts(self, symbol: str) -> None:
-        """透過 REST API 抓取 aggTrade，聚合後送入訂單流策略（跨輪累積）。"""
-        try:
-            # 首次呼叫時從本地快取載入歷史 bars（避免重啟後等 30 分鐘）
-            if symbol not in self._last_trade_id:
-                for of_strategy in self.of_strategies:
-                    of_strategy.load_cache(symbol)
-
-            raw_trades = self.exchange.fetch_agg_trades(symbol, limit=1000)
-            if not raw_trades:
-                logger.debug("%s無 aggTrade 數據", _L2)
-                return
-
-            # 過濾已處理的 trades（避免重複餵入）
-            last_id = int(self._last_trade_id.get(symbol, 0))
-            new_trades = [t for t in raw_trades if int(t.get("trade_id") or 0) > last_id]
-
-            if not new_trades:
-                # 無新交易，仍用最近一根 bar 的結論
-                for of_strategy in self.of_strategies:
-                    verdict = of_strategy.latest_verdict(symbol)
-                    if verdict is not None:
-                        self.router.collect(verdict)
-                return
-
-            # 更新 last_trade_id
-            self._last_trade_id[symbol] = int(new_trades[-1]["trade_id"] or 0)
-
-            # 取得或建立 aggregator（跨輪保留）
-            if symbol not in self._aggregators:
-                self._aggregators[symbol] = BarAggregator(
-                    interval_seconds=self.settings.orderflow.bar_interval_seconds,
-                    tick_size=self.settings.orderflow.tick_size,
-                )
-            aggregator = self._aggregators[symbol]
-
-            # 將新 trades 聚合為 bars
-            new_bars = []
-            for t in new_trades:
-                trade = AggTrade(
-                    trade_id=t["trade_id"] or 0,
-                    price=t["price"],
-                    quantity=t["quantity"],
-                    timestamp=datetime.fromtimestamp(
-                        t["timestamp"] / 1000, tz=timezone.utc
-                    ),
-                    is_buyer_maker=t["is_buyer_maker"],
-                )
-                bar = aggregator.add_trade(trade)
-                if bar is not None:
-                    new_bars.append(bar)
-
-            # 不 flush 最後一根（留給下一輪繼續聚合）
-
-            if new_bars:
-                logger.info("%saggTrade → %d 根新訂單流 K 線", _L2, len(new_bars))
-
-            # 送入各訂單流策略（不 reset，跨輪累積）
-            for of_strategy in self.of_strategies:
-                verdict = None
-                for bar in new_bars:
-                    verdict = of_strategy.on_bar(symbol, bar)
-
-                # 無新 bar 時用最近結論
-                if verdict is None:
-                    verdict = of_strategy.latest_verdict(symbol)
-
-                if verdict is not None:
-                    self.router.collect(verdict)
-                    logger.info(
-                        "%s[%s] %s (信心 %.2f) [%d/%d bars] — %s",
-                        _L2, of_strategy.name, verdict.signal.value,
-                        verdict.confidence,
-                        len(of_strategy._bars), of_strategy.required_bars,
-                        verdict.reasoning[:60],
-                    )
-
-        except Exception:
-            logger.exception("%s訂單流分析失敗", _L2)
+            self._execute_sell(symbol, current_price, cycle_id)
 
     def _make_decision(
         self,
         verdicts: list[StrategyVerdict],
         symbol: str,
         current_price: float,
+        cycle_id: str = "",
     ) -> tuple[Signal, float]:
-        """LLM 啟用時呼叫 LLM 分析，否則加權投票。"""
+        """所有非 HOLD 決策強制過 LLM 審查；LLM 失敗直接 HOLD。"""
         non_hold = [v for v in verdicts if v.signal != Signal.HOLD]
         if not non_hold:
             return Signal.HOLD, 0.0
 
-        # 檢查是否有策略達到最低信心門檻
-        min_conf = self.settings.llm.min_confidence
-        qualified = [v for v in non_hold if v.confidence >= min_conf]
-        if not qualified:
-            logger.info(
-                "%s所有策略信心低於 %.2f → 跳過 LLM，使用加權投票", _L2, min_conf
-            )
-
-        if self.llm_engine.enabled and qualified:
+        # ── LLM 審查（強制） ──
+        if self.llm_engine.enabled:
             try:
                 portfolio = self._build_portfolio_state(symbol, current_price)
                 decision = self.llm_engine.decide_sync(
@@ -429,6 +448,7 @@ class TradingBot:
                 self._db.insert_llm_decision(
                     symbol, decision.action, decision.confidence,
                     decision.reasoning, self.settings.llm.model,
+                    cycle_id,
                 )
                 logger.info(
                     "%s[LLM] %s (信心 %.2f) — %s",
@@ -438,16 +458,10 @@ class TradingBot:
                 action_map = {"BUY": Signal.BUY, "SELL": Signal.SELL}
                 return action_map.get(decision.action, Signal.HOLD), decision.confidence
             except Exception as e:
-                logger.warning("%sLLM 決策失敗 → 改用加權投票: %s", _L2, e)
+                logger.warning("%sLLM 決策失敗 → HOLD: %s", _L2, e)
 
-        # Fallback: 加權投票
-        vote_result = self.router.weighted_vote()
-        logger.info(
-            "%s[加權投票] %s (信心 %.2f) — %s",
-            _L2, vote_result.signal.value, vote_result.confidence,
-            vote_result.reasoning,
-        )
-        return vote_result.signal, vote_result.confidence
+        # LLM 關閉或失敗 → 直接 HOLD
+        return Signal.HOLD, 0.0
 
     def _build_portfolio_state(
         self, symbol: str, current_price: float
@@ -455,7 +469,7 @@ class TradingBot:
         """建構投資組合狀態（供 LLM 參考）。"""
         try:
             balance = self.exchange.get_balance()
-            usdt_balance = balance.get("USDT", 0.0)
+            usdt_balance = balance.get("USDT", 0.0) + balance.get("LDUSDT", 0.0)
         except Exception:
             usdt_balance = 0.0
 
@@ -485,7 +499,8 @@ class TradingBot:
             daily_risk_remaining=usdt_balance * self.settings.risk.max_daily_loss_pct + self.risk_manager._daily_pnl,
         )
 
-    def _execute_buy(self, symbol: str, price: float, risk_output) -> None:
+    def _execute_buy(self, symbol: str, price: float, risk_output,
+                     cycle_id: str = "") -> None:
         order = self.executor.execute(Signal.BUY, symbol, risk_output)
         if order:
             fill_price = order.get("price", price)
@@ -508,7 +523,8 @@ class TradingBot:
                 sl_order_id=sl_order_id,
             )
             self.order_manager.add_order(order)
-            self._db.insert_order(order)
+            _mode = self.settings.trading.mode.value
+            self._db.insert_order(order, mode=_mode, cycle_id=cycle_id)
             self._db.upsert_position(symbol, {
                 "quantity": risk_output.quantity,
                 "entry_price": fill_price,
@@ -516,14 +532,15 @@ class TradingBot:
                 "unrealized_pnl": 0,
                 "stop_loss": risk_output.stop_loss_price,
                 "take_profit": risk_output.take_profit_price,
-            })
+            }, mode=_mode)
             logger.info(
                 "%s✓ BUY %s @ %.2f, qty=%.8f (SL=%.2f, TP=%.2f)",
                 _L3, symbol, fill_price, risk_output.quantity,
                 risk_output.stop_loss_price, risk_output.take_profit_price,
             )
 
-    def _execute_sell(self, symbol: str, price: float) -> None:
+    def _execute_sell(self, symbol: str, price: float,
+                      cycle_id: str = "") -> None:
         # 取消交易所上的 SL/TP 掛單（若有）
         tp_id, sl_id = self.risk_manager.get_sl_tp_order_ids(symbol)
         if tp_id or sl_id:
@@ -539,8 +556,9 @@ class TradingBot:
             fill_price = order.get("price", price)
             pnl = self.risk_manager.remove_position(symbol, fill_price)
             self.order_manager.add_order(order)
-            self._db.insert_order(order)
-            self._db.delete_position(symbol)
+            _mode = self.settings.trading.mode.value
+            self._db.insert_order(order, mode=_mode, cycle_id=cycle_id)
+            self._db.delete_position(symbol, mode=_mode)
             logger.info("%s✓ SELL %s @ %.2f, PnL=%.2f USDT", _L3, symbol, fill_price, pnl)
 
     def _check_loan_health(self) -> None:
@@ -638,10 +656,10 @@ class TradingBot:
         additional_qty = additional_value_usdt / coin_price
         buy_cost_usdt = additional_qty * coin_price
 
-        # 查可用 USDT 餘額
+        # 查可用 USDT 餘額（含 Earn 持倉）
         try:
             balance = self.exchange.get_balance()
-            usdt_available = balance.get("USDT", 0.0)
+            usdt_available = balance.get("USDT", 0.0) + balance.get("LDUSDT", 0.0)
         except Exception:
             usdt_available = 0.0
 

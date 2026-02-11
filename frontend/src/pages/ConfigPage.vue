@@ -98,7 +98,7 @@ const error = ref('')
 const expandedPaths = reactive(new Set<string>())
 const tagInput = ref<Record<string, string>>({})
 const selectedPath = ref('')
-const selectedVersionId = ref('')
+const selectedVersionId = ref<number | null>(null)
 const mobilePanel = ref<'nav' | 'editor'>('nav')
 
 // Schema editor state
@@ -223,7 +223,7 @@ function loadVersion(config: BotConfig) {
   }
 }
 
-function onVersionSelect(id: string) {
+function onVersionSelect(id: number) {
   const config = configs.value.find(c => c.id === id)
   if (config) loadVersion(config)
 }
@@ -264,24 +264,24 @@ function setByPath(obj: Record<string, unknown>, path: string, value: unknown) {
   const parts = path.split('.')
   let cur: Record<string, unknown> = obj
   for (let i = 0; i < parts.length - 1; i++) {
-    const p = parts[i]
+    const p = parts[i]!
     if (cur[p] == null || typeof cur[p] !== 'object') {
       cur[p] = {}
     }
     cur = cur[p] as Record<string, unknown>
   }
-  cur[parts[parts.length - 1]] = value
+  cur[parts[parts.length - 1]!] = value
 }
 
 function deleteByPath(obj: Record<string, unknown>, path: string) {
   const parts = path.split('.')
   let cur: Record<string, unknown> = obj
   for (let i = 0; i < parts.length - 1; i++) {
-    const p = parts[i]
+    const p = parts[i]!
     if (cur[p] == null || typeof cur[p] !== 'object') return
     cur = cur[p] as Record<string, unknown>
   }
-  const lastKey = parts[parts.length - 1]
+  const lastKey = parts[parts.length - 1]!
   if (Array.isArray(cur)) {
     cur.splice(Number(lastKey), 1)
   } else {
@@ -538,7 +538,7 @@ onMounted(async () => {
         v-if="configs.length"
         :value="selectedVersionId"
         class="bg-(--color-bg-card) border border-(--color-border) rounded-lg px-3 py-1.5 text-sm font-mono text-(--color-text-primary) focus:outline-none focus:border-(--color-accent) min-w-0 max-w-72"
-        @change="onVersionSelect(($event.target as HTMLSelectElement).value)"
+        @change="onVersionSelect(Number(($event.target as HTMLSelectElement).value))"
       >
         <option v-for="c in configs" :key="c.id" :value="c.id">
           v{{ c.version }} - {{ c.changed_by }} - {{ formatTimeShort(c.created_at) }}

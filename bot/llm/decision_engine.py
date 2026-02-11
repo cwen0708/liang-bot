@@ -37,6 +37,7 @@ class LLMDecisionEngine:
         portfolio: PortfolioState,
         symbol: str,
         current_price: float,
+        market_type: str = "spot",
     ) -> LLMDecision:
         """
         根據策略結論和倉位狀態做出 LLM 決策。
@@ -46,6 +47,7 @@ class LLMDecisionEngine:
             portfolio: 當前投資組合狀態。
             symbol: 交易對。
             current_price: 當前價格。
+            market_type: "spot" 或 "futures"。
 
         Returns:
             LLMDecision 決策結果。
@@ -65,6 +67,7 @@ class LLMDecisionEngine:
                 portfolio_state=portfolio_summary,
                 symbol=symbol,
                 current_price=current_price,
+                market_type=market_type,
             )
 
             # 3. 呼叫 LLM
@@ -88,10 +91,13 @@ class LLMDecisionEngine:
         portfolio: PortfolioState,
         symbol: str,
         current_price: float,
+        market_type: str = "spot",
     ) -> LLMDecision:
         """同步版本的 decide。"""
         import asyncio
-        return asyncio.run(self.decide(verdicts, portfolio, symbol, current_price))
+        return asyncio.run(
+            self.decide(verdicts, portfolio, symbol, current_price, market_type),
+        )
 
     @staticmethod
     def _parse_decision(response: str) -> LLMDecision:
@@ -121,13 +127,12 @@ class LLMDecisionEngine:
         if not verdicts:
             return LLMDecision(action="HOLD", confidence=0.0, reasoning="無策略結論")
 
-        weights = self.config.fallback_weights
         buy_score = 0.0
         sell_score = 0.0
         total_weight = 0.0
 
         for v in verdicts:
-            w = weights.get(v.strategy_name, 1.0)
+            w = 1.0
             total_weight += w
             if v.signal == Signal.BUY:
                 buy_score += v.confidence * w

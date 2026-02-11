@@ -15,6 +15,11 @@ class PositionInfo(BaseModel):
     unrealized_pnl: float = 0.0
     unrealized_pnl_pct: float = 0.0
     holding_duration: str = ""
+    # 合約專用欄位
+    side: str = "long"           # "long" / "short"
+    leverage: int = 1
+    liquidation_price: float | None = None
+    market_type: str = "spot"    # "spot" / "futures"
 
 
 class PortfolioState(BaseModel):
@@ -27,6 +32,12 @@ class PortfolioState(BaseModel):
     daily_risk_remaining: float = 0.0
     max_positions: int = 3
     current_position_count: int = 0
+    # 合約專用欄位
+    market_type: str = "spot"             # "spot" / "futures"
+    margin_balance: float = 0.0           # 保證金餘額
+    margin_ratio: float = 0.0             # 保證金比率 (0~1)
+    funding_rate: float = 0.0             # 資金費率
+    leverage: int = 1                     # 槓桿倍數
 
 
 class OrderFlowSummary(BaseModel):
@@ -44,7 +55,7 @@ class OrderFlowSummary(BaseModel):
 class LLMDecision(BaseModel):
     """LLM 交易決策結果。"""
 
-    action: str = Field(description="BUY / SELL / HOLD")
+    action: str = Field(description="BUY / SELL / HOLD / SHORT / COVER")
     confidence: float = Field(ge=0.0, le=1.0, description="決策信心度")
     stop_loss_pct: float = Field(default=0.03, description="建議停損百分比")
     take_profit_pct: float = Field(default=0.06, description="建議停利百分比")

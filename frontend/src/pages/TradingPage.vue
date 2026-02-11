@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { createChart, createSeriesMarkers, type IChartApi, type UTCTimestamp, ColorType, LineStyle, LineSeries } from 'lightweight-charts'
 import { useBotStore } from '@/stores/bot'
 import { useSupabase } from '@/composables/useSupabase'
@@ -13,7 +13,7 @@ const { isDark } = useTheme()
 
 const chartContainer = ref<HTMLElement>()
 const selectedSymbol = ref('BTC/USDT')
-const filterMode = ref<'live' | 'paper'>('live')
+const filterMode = computed(() => bot.globalMode)
 const chartInterval = ref('5m')
 const intervalOptions = [
   { value: '1m', label: '1分', ws: '1m' },
@@ -314,23 +314,7 @@ watch(isDark, async () => {
 <template>
   <div class="p-4 md:p-6 space-y-4 md:space-y-6">
     <div class="flex items-center justify-between gap-2">
-      <h2 class="text-2xl md:text-3xl font-bold">交易</h2>
-      <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
-        <button
-          class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
-          :class="filterMode === 'live'
-            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-          @click="filterMode = 'live'"
-        >Live</button>
-        <button
-          class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
-          :class="filterMode === 'paper'
-            ? 'bg-(--color-bg-card) text-(--color-accent) shadow-sm'
-            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-          @click="filterMode = 'paper'"
-        >Paper</button>
-      </div>
+      <h2 class="text-2xl md:text-3xl font-bold">行情</h2>
     </div>
 
     <!-- Chart: Binance live kline -->

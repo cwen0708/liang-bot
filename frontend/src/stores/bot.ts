@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useSupabase } from '@/composables/useSupabase'
-import type { AccountBalance, BotStatus, Position, MarketSnapshot, LoanHealth } from '@/types'
+import type { AccountBalance, BotStatus, Position, MarketSnapshot, LoanHealth, FuturesMargin, FuturesFunding } from '@/types'
 
 export const useBotStore = defineStore('bot', () => {
   const supabase = useSupabase()
@@ -13,6 +13,30 @@ export const useBotStore = defineStore('bot', () => {
   const totalUsdt = ref(0)
   const loans = ref<LoanHealth[]>([])
   const pricesReady = ref(false)
+  const futuresMargin = ref<FuturesMargin | null>(null)
+  const futuresFunding = ref<FuturesFunding[]>([])
+
+  // 設定檔交易對（從 bot_config 載入）
+  const spotPairs = ref<string[]>([])
+  const futuresPairs = ref<string[]>([])
+
+  // Global Live/Paper mode toggle (persisted to localStorage)
+  const MODE_KEY = 'bot:globalMode'
+  const globalMode = ref<'live' | 'paper'>(
+    (localStorage.getItem(MODE_KEY) as 'live' | 'paper') || 'live',
+  )
+  function setGlobalMode(mode: 'live' | 'paper') {
+    globalMode.value = mode
+    localStorage.setItem(MODE_KEY, mode)
+  }
+
+  // Computed: 現貨 / 合約持倉分離
+  const spotPositions = computed(() =>
+    positions.value.filter(p => (p.market_type ?? 'spot') === 'spot'),
+  )
+  const futuresPositions = computed(() =>
+    positions.value.filter(p => p.market_type === 'futures'),
+  )
 
   // Restore cached prices from localStorage on init
   const PRICES_CACHE_KEY = 'bot:latestPrices'
@@ -126,6 +150,49 @@ export const useBotStore = defineStore('bot', () => {
     }
   }
 
+  async function fetchFuturesMargin() {
+    const { data } = await supabase
+      .from('futures_margin')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(1)
+    if (data?.[0]) futuresMargin.value = data[0] as FuturesMargin
+  }
+
+  async function fetchConfigPairs() {
+    const { data } = await supabase
+      .from('bot_config')
+      .select('config_json')
+      .order('version', { ascending: false })
+      .limit(1)
+    if (data?.[0]) {
+      const cfg = (data[0] as { config_json: Record<string, unknown> }).config_json
+      const spot = cfg.spot as Record<string, unknown> | undefined
+      const futures = cfg.futures as Record<string, unknown> | undefined
+      // 支援新格式 (spot) 和舊格式 (trading)
+      if (spot && Array.isArray(spot.pairs)) {
+        spotPairs.value = spot.pairs as string[]
+      } else {
+        const trading = cfg.trading as Record<string, unknown> | undefined
+        if (trading && Array.isArray(trading.pairs)) {
+          spotPairs.value = trading.pairs as string[]
+        }
+      }
+      if (futures && Array.isArray(futures.pairs)) {
+        futuresPairs.value = futures.pairs as string[]
+      }
+    }
+  }
+
+  async function fetchFuturesFunding() {
+    const { data } = await supabase
+      .from('futures_funding')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(20)
+    if (data) futuresFunding.value = data as FuturesFunding[]
+  }
+
   // Subscribe to realtime updates
   function subscribeRealtime() {
     supabase
@@ -173,11 +240,27 @@ export const useBotStore = defineStore('bot', () => {
         fetchLoans()
       })
       .subscribe()
+
+    supabase
+      .channel('store:futures_margin')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'futures_margin' }, (p) => {
+        futuresMargin.value = p.new as FuturesMargin
+      })
+      .subscribe()
+
+    supabase
+      .channel('store:futures_funding')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'futures_funding' }, () => {
+        fetchFuturesFunding()
+      })
+      .subscribe()
   }
 
   return {
     status,
     positions,
+    spotPositions,
+    futuresPositions,
     latestPrices,
     pricesReady,
     balances,
@@ -186,11 +269,20 @@ export const useBotStore = defineStore('bot', () => {
     netLoanValue,
     totalAssets,
     isOnline,
+    futuresMargin,
+    futuresFunding,
+    spotPairs,
+    futuresPairs,
+    globalMode,
+    setGlobalMode,
     fetchStatus,
     fetchPositions,
     fetchLatestPrices,
     fetchBalances,
     fetchLoans,
+    fetchFuturesMargin,
+    fetchFuturesFunding,
+    fetchConfigPairs,
     subscribeRealtime,
   }
 })

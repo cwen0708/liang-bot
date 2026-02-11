@@ -24,7 +24,7 @@ class ExchangeConfig:
 class SpotConfig:
     """現貨交易配置（合併交易參數與風控參數）。"""
     mode: TradingMode = TradingMode.PAPER
-    pairs: tuple[str, ...] = ("BTC/USDT",)
+    pairs: tuple[str, ...] = ("BTC/USDT", "ETH/USDT", "PAXG/USDT")
     timeframe: str = "1h"
     check_interval_seconds: int = 60
     max_position_pct: float = 0.02
@@ -106,7 +106,10 @@ class AtrConfig:
 class FuturesConfig:
     """USDT-M 永續合約配置。"""
     enabled: bool = False
-    pairs: tuple[str, ...] = ()
+    pairs: tuple[str, ...] = (
+        "BTC/USDT", "ETH/USDT", "LINK/USDT", "AVAX/USDT",
+        "BNB/USDT", "SOL/USDT", "DOGE/USDT", "ADA/USDT",
+    )
     leverage: int = 3
     margin_type: str = "cross"
     max_leverage: int = 5

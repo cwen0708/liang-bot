@@ -249,6 +249,24 @@ class BinanceClient(BaseExchange):
         except ccxt.BaseError as e:
             raise ExchangeError(f"還款失敗: {e}") from e
 
+    @retry(max_retries=3, delay=1.0)
+    def fetch_loan_adjust_history(
+        self, loan_coin: str, collateral_coin: str, limit: int = 100
+    ) -> list[dict]:
+        """查詢借貸 LTV 調整歷史（Flexible Loan v2）。"""
+        try:
+            result = self._exchange.request(
+                "loan/flexible/ltv/adjustment/history",
+                "sapiV2", "GET", {
+                    "loanCoin": loan_coin,
+                    "collateralCoin": collateral_coin,
+                    "limit": limit,
+                },
+            )
+            return result.get("rows", [])
+        except ccxt.BaseError as e:
+            raise ExchangeError(f"查詢借貸調整歷史失敗: {e}") from e
+
     def loan_adjust_ltv(
         self, loan_coin: str, collateral_coin: str, adjustment_amount: float, direction: str = "ADDITIONAL"
     ) -> dict:

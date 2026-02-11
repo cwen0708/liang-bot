@@ -18,8 +18,11 @@ const filteredLogs = computed(() => {
       (l) => l.message.toLowerCase().includes(q) || l.module.toLowerCase().includes(q),
     )
   }
-  // 按 created_at 降序（毫秒精度），避免同秒批次日誌順序錯亂
-  return [...result].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+  // 降序：最新的在最上面
+  return [...result].sort((a, b) => {
+    const diff = new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    return diff !== 0 ? diff : b.id - a.id
+  })
 })
 
 function levelColor(level: string) {
@@ -32,6 +35,16 @@ function levelColor(level: string) {
   }
 }
 
+function levelDotColor(level: string) {
+  switch (level) {
+    case 'ERROR': return 'bg-(--color-danger)'
+    case 'WARNING': return 'bg-(--color-warning)'
+    case 'INFO': return 'bg-(--color-accent)'
+    case 'DEBUG': return 'bg-(--color-text-secondary)'
+    default: return 'bg-(--color-text-primary)'
+  }
+}
+
 function formatTime(ts: string) {
   const d = new Date(ts)
   const hms = d.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
@@ -41,8 +54,8 @@ function formatTime(ts: string) {
 </script>
 
 <template>
-  <div class="p-4 md:p-6 flex flex-col gap-4 md:gap-6 md:h-[calc(100vh)] md:overflow-hidden">
-    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+  <div class="flex flex-col h-[calc(100dvh-60px-64px)] md:h-screen md:overflow-hidden p-4 md:p-6 gap-4 md:gap-6">
+    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 shrink-0">
       <h2 class="text-2xl md:text-3xl font-bold">日誌</h2>
       <div class="flex gap-2 w-full sm:w-auto">
         <select
@@ -63,11 +76,14 @@ function formatTime(ts: string) {
       </div>
     </div>
 
-    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl overflow-hidden shadow-sm dark:shadow-none min-h-0 md:flex-1 flex flex-col">
+    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl overflow-hidden shadow-sm dark:shadow-none min-h-0 flex-1 flex flex-col">
       <div v-if="loading" class="p-8 text-center text-(--color-text-secondary) text-base">載入中...</div>
 
       <!-- Desktop: horizontal log lines -->
-      <div v-else class="hidden md:block min-h-0 flex-1 overflow-auto font-mono text-base">
+      <div
+        v-else
+        class="hidden md:block min-h-0 flex-1 overflow-auto font-mono text-base"
+      >
         <div
           v-for="log in filteredLogs"
           :key="log.id"
@@ -82,18 +98,19 @@ function formatTime(ts: string) {
         </div>
       </div>
 
-      <!-- Mobile: stacked log entries -->
-      <div v-if="!loading" class="md:hidden max-h-[calc(100vh-200px)] overflow-auto">
+      <!-- Mobile: single-line log entries -->
+      <div
+        v-if="!loading"
+        class="md:hidden min-h-0 flex-1 overflow-auto font-mono text-sm"
+      >
         <div
           v-for="log in filteredLogs"
           :key="log.id"
-          class="px-3 py-2 border-b border-(--color-border)/30"
+          class="flex items-center gap-2 px-3 py-1.5 border-b border-(--color-border)/30"
         >
-          <div class="flex justify-between items-center">
-            <span class="text-base font-bold" :class="levelColor(log.level)">{{ log.level }}</span>
-            <span class="text-sm text-(--color-text-secondary)">{{ formatTime(log.created_at) }} &middot; {{ log.module }}</span>
-          </div>
-          <div class="text-base text-(--color-text-primary) mt-0.5 break-all">{{ log.message }}</div>
+          <span class="w-2 h-2 rounded-full shrink-0" :class="levelDotColor(log.level)" />
+          <span class="text-(--color-text-primary) truncate flex-1">{{ log.message }}</span>
+          <span class="text-(--color-text-secondary) shrink-0 text-xs">{{ formatTime(log.created_at) }}</span>
         </div>
         <div v-if="!filteredLogs.length" class="p-8 text-center text-(--color-text-secondary) text-base">
           無符合條件的日誌

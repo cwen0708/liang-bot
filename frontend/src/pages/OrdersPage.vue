@@ -8,31 +8,31 @@ const bot = useBotStore()
 const { rows: orders, loading } = useRealtimeTable<Order>('orders', { limit: 100 })
 const { rows: decisions } = useRealtimeTable<LLMDecision>('llm_decisions', { limit: 200 })
 
-const filterMode = ref<'live' | 'paper'>('live')
+const filterMode = computed(() => bot.globalMode)
 const filterSymbol = ref('')
 const filterStatus = ref('')
 const expandedOrderId = ref<number | null>(null)
 
 const availableSymbols = computed(() => {
   const set = new Set<string>()
-  for (const p of bot.positions) {
+  for (const p of bot.spotPositions) {
     if ((p.mode ?? 'live') === filterMode.value) set.add(p.symbol)
   }
   for (const o of orders.value) {
-    if ((o.mode ?? 'live') === filterMode.value) set.add(o.symbol)
+    if ((o.mode ?? 'live') === filterMode.value && (o.market_type ?? 'spot') === 'spot') set.add(o.symbol)
   }
   return [...set].sort()
 })
 
-// --- Positions filtered by mode ---
+// --- Positions filtered by mode (spot only) ---
 const filteredPositions = computed(() => {
-  return bot.positions.filter(p => (p.mode ?? 'live') === filterMode.value)
+  return bot.spotPositions.filter(p => (p.mode ?? 'live') === filterMode.value)
 })
 
-// --- Orders filtered by mode + symbol + status ---
+// --- Orders filtered by mode + spot only + symbol + status ---
 const filteredOrders = computed(() => {
   let result = [...orders.value]
-    .filter(o => (o.mode ?? 'live') === filterMode.value)
+    .filter(o => (o.mode ?? 'live') === filterMode.value && (o.market_type ?? 'spot') === 'spot')
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
   if (filterSymbol.value) {
     result = result.filter(o => o.symbol === filterSymbol.value)
@@ -93,6 +93,14 @@ function formatDateShort(ts: string) {
 function livePrice(symbol: string, fallback: number): number {
   return bot.latestPrices[symbol] ?? fallback
 }
+
+function calcPnl(pos: { symbol: string; entry_price: number; quantity: number; current_price: number; side?: string }) {
+  const price = livePrice(pos.symbol, pos.current_price)
+  const direction = pos.side === 'short' ? -1 : 1
+  const pnl = (price - pos.entry_price) * pos.quantity * direction
+  const pnlPct = pos.entry_price > 0 ? ((price - pos.entry_price) / pos.entry_price) * 100 * direction : 0
+  return { pnl, pnlPct }
+}
 </script>
 
 <template>
@@ -100,24 +108,7 @@ function livePrice(symbol: string, fallback: number): number {
     <!-- Header + Mode toggle -->
     <div class="flex flex-col gap-3 shrink-0">
       <div class="flex items-center justify-between gap-2">
-        <h2 class="text-2xl md:text-3xl font-bold">訂單</h2>
-        <!-- Mode toggle -->
-        <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
-          <button
-            class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
-            :class="filterMode === 'live'
-              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="filterMode = 'live'; filterSymbol = ''"
-          >Live</button>
-          <button
-            class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
-            :class="filterMode === 'paper'
-              ? 'bg-(--color-bg-card) text-(--color-accent) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="filterMode = 'paper'; filterSymbol = ''"
-          >Paper</button>
-        </div>
+        <h2 class="text-2xl md:text-3xl font-bold">現貨</h2>
       </div>
 
       <!-- Status filters -->
@@ -175,10 +166,16 @@ function livePrice(symbol: string, fallback: number): number {
               <!-- Header: symbol + PnL -->
               <div class="flex justify-between items-center mb-2">
                 <span class="font-bold text-sm">{{ pos.symbol.replace('/USDT', '') }}</span>
-                <span
-                  class="font-bold text-sm"
-                  :class="pos.unrealized_pnl >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'"
-                >{{ pos.unrealized_pnl >= 0 ? '+' : '' }}{{ pos.unrealized_pnl.toFixed(2) }}</span>
+                <div class="text-right">
+                  <span
+                    class="font-bold text-sm block"
+                    :class="calcPnl(pos).pnl >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'"
+                  >{{ calcPnl(pos).pnl >= 0 ? '+' : '' }}{{ calcPnl(pos).pnl.toFixed(2) }}</span>
+                  <span
+                    class="text-xs"
+                    :class="calcPnl(pos).pnlPct >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'"
+                  >{{ calcPnl(pos).pnlPct >= 0 ? '+' : '' }}{{ calcPnl(pos).pnlPct.toFixed(2) }}%</span>
+                </div>
               </div>
               <!-- Compact info -->
               <div class="text-xs text-(--color-text-secondary) space-y-0.5">

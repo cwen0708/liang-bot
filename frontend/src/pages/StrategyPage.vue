@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRealtimeTable } from '@/composables/useRealtime'
 import { useBotStore } from '@/stores/bot'
 import type { StrategyVerdict, LLMDecision } from '@/types'
@@ -9,9 +9,28 @@ const bot = useBotStore()
 const { rows: verdicts, loading: vLoading } = useRealtimeTable<StrategyVerdict>('strategy_verdicts', { limit: 500 })
 const { rows: decisions, loading: dLoading } = useRealtimeTable<LLMDecision>('llm_decisions', { limit: 200 })
 
+const marketTab = ref<'spot' | 'futures'>('spot')
+
+onMounted(() => {
+  if (!bot.spotPairs.length) bot.fetchConfigPairs()
+})
+
+// 依設定檔交易對篩選，而非 market_type 欄位
+const filteredDecisions = computed(() => {
+  const pairs = marketTab.value === 'spot' ? bot.spotPairs : bot.futuresPairs
+  if (!pairs.length) return decisions.value.filter(d => (d.market_type ?? 'spot') === marketTab.value)
+  return decisions.value.filter(d => pairs.includes(d.symbol))
+})
+
+const filteredVerdicts = computed(() => {
+  const pairs = marketTab.value === 'spot' ? bot.spotPairs : bot.futuresPairs
+  if (!pairs.length) return verdicts.value.filter(v => (v.market_type ?? 'spot') === marketTab.value)
+  return verdicts.value.filter(v => pairs.includes(v.symbol))
+})
+
 const symbols = computed(() => {
   const set = new Set<string>()
-  for (const d of decisions.value) if (d.symbol) set.add(d.symbol)
+  for (const d of filteredDecisions.value) if (d.symbol) set.add(d.symbol)
   return [...set].sort((a, b) => (bot.latestPrices[b] ?? 0) - (bot.latestPrices[a] ?? 0))
 })
 
@@ -23,7 +42,7 @@ function getGroupedDecisions(symbol: string): { action: string; label: string; c
   return actionOrder.map(action => ({
     action,
     label: labels[action] ?? action,
-    cards: decisions.value
+    cards: filteredDecisions.value
       .filter(d => d.symbol === symbol && d.action === action)
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       .slice(0, 1),
@@ -36,7 +55,7 @@ type VerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
 
 /** Returns all 5 strategies with their verdict for a given decision, matched by cycle_id */
 function getVerdictSlots(decision: LLMDecision): VerdictSlot[] {
-  const matched = verdicts.value.filter(v => v.cycle_id === decision.cycle_id && v.symbol === decision.symbol)
+  const matched = filteredVerdicts.value.filter(v => v.cycle_id === decision.cycle_id && v.symbol === decision.symbol)
   return allStrategies.map(s => ({
     strategy: s,
     verdict: matched.find(v => v.strategy === s) ?? null,
@@ -88,7 +107,7 @@ function actionDotColor(action: string) {
 
 /** Count decisions by action for column header stats */
 function actionCounts(symbol: string): { buy: number; sell: number; hold: number } {
-  const decs = decisions.value.filter(d => d.symbol === symbol)
+  const decs = filteredDecisions.value.filter(d => d.symbol === symbol)
   return {
     buy: decs.filter(d => d.action === 'BUY').length,
     sell: decs.filter(d => d.action === 'SELL').length,
@@ -98,7 +117,7 @@ function actionCounts(symbol: string): { buy: number; sell: number; hold: number
 
 /** Previous decisions for the same symbol+action, excluding the current one */
 function getPreviousDecisions(current: LLMDecision): LLMDecision[] {
-  return decisions.value
+  return filteredDecisions.value
     .filter(d => d.symbol === current.symbol && d.action === current.action && d.id !== current.id)
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
     .slice(0, 5)
@@ -120,8 +139,26 @@ function closeDrawer() {
   <div class="p-4 md:p-6 md:pb-0 flex flex-col gap-4 md:gap-6 md:h-[calc(100vh)] md:overflow-hidden">
     <!-- Header -->
     <div class="flex items-center justify-between shrink-0">
-      <h2 class="text-2xl md:text-3xl font-bold">策略</h2>
-      <div class="text-sm text-(--color-text-muted)">{{ decisions.length }} 筆決策</div>
+      <div class="flex items-center gap-3">
+        <h2 class="text-2xl md:text-3xl font-bold">策略</h2>
+        <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
+          <button
+            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+            :class="marketTab === 'spot'
+              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+            @click="marketTab = 'spot'"
+          >現貨</button>
+          <button
+            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+            :class="marketTab === 'futures'
+              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+            @click="marketTab = 'futures'"
+          >合約</button>
+        </div>
+      </div>
+      <div class="text-sm text-(--color-text-muted)">{{ filteredDecisions.length }} 筆決策</div>
     </div>
 
     <!-- Loading -->
@@ -141,7 +178,7 @@ function closeDrawer() {
           <div class="px-3 pt-3 pb-2 shrink-0">
             <div class="flex items-center justify-between mb-1">
               <span class="font-bold text-sm text-(--color-text-primary)">{{ sym.replace('/USDT', '') }}</span>
-              <span class="text-xs text-(--color-text-muted) tabular-nums">{{ decisions.filter(d => d.symbol === sym).length }}</span>
+              <span class="text-xs text-(--color-text-muted) tabular-nums">{{ filteredDecisions.filter(d => d.symbol === sym).length }}</span>
             </div>
             <div class="text-xs text-(--color-text-muted) tabular-nums">
               ${{ bot.latestPrices[sym]?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '-' }}

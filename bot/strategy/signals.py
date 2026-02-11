@@ -9,6 +9,8 @@ class Signal(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
     HOLD = "HOLD"
+    SHORT = "SHORT"    # 開空（合約專用）
+    COVER = "COVER"    # 平空（合約專用）
 
 
 @dataclass

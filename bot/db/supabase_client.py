@@ -38,6 +38,7 @@ class SupabaseWriter:
         self._log_flush_interval = 5  # 秒
         self._log_flush_size = 20     # 筆
         self._last_log_flush = time.monotonic()
+        self._log_seq = 0             # 同毫秒日誌序號（微秒偏移）
 
         logger.info("Supabase 連線已建立: %s", url)
 
@@ -79,7 +80,8 @@ class SupabaseWriter:
 
     def insert_verdict(self, symbol: str, strategy: str, signal: str,
                        confidence: float, reasoning: str = "",
-                       cycle_id: str = "") -> None:
+                       cycle_id: str = "",
+                       market_type: str = "spot") -> None:
         if not self._enabled:
             return
         try:
@@ -90,6 +92,7 @@ class SupabaseWriter:
                 "confidence": confidence,
                 "reasoning": reasoning[:500],
                 "cycle_id": cycle_id,
+                "market_type": market_type,
             }).execute()
         except Exception as e:
             logger.debug("寫入 strategy_verdicts 失敗: %s", e)
@@ -98,7 +101,8 @@ class SupabaseWriter:
 
     def insert_llm_decision(self, symbol: str, action: str, confidence: float,
                             reasoning: str = "", model: str = "",
-                            cycle_id: str = "") -> None:
+                            cycle_id: str = "",
+                            market_type: str = "spot") -> None:
         if not self._enabled:
             return
         try:
@@ -109,6 +113,7 @@ class SupabaseWriter:
                 "reasoning": reasoning[:500],
                 "model": model,
                 "cycle_id": cycle_id,
+                "market_type": market_type,
             }).execute()
         except Exception as e:
             logger.debug("寫入 llm_decisions 失敗: %s", e)
@@ -116,7 +121,11 @@ class SupabaseWriter:
     # ─── Orders ───
 
     def insert_order(self, order: dict, mode: str = "live",
-                     cycle_id: str = "") -> None:
+                     cycle_id: str = "",
+                     market_type: str = "spot",
+                     position_side: str = "long",
+                     leverage: int = 1,
+                     reduce_only: bool = False) -> None:
         if not self._enabled:
             return
         try:
@@ -132,19 +141,29 @@ class SupabaseWriter:
                 "source": order.get("source", "bot"),
                 "mode": mode,
                 "cycle_id": cycle_id,
+                "market_type": market_type,
+                "position_side": position_side,
+                "leverage": leverage,
+                "reduce_only": reduce_only,
             }).execute()
         except Exception as e:
             logger.debug("寫入 orders 失敗: %s", e)
 
     # ─── Positions ───
 
-    def upsert_position(self, symbol: str, data: dict, mode: str = "live") -> None:
+    def upsert_position(self, symbol: str, data: dict, mode: str = "live",
+                        market_type: str = "spot") -> None:
         if not self._enabled:
             return
         try:
             self._client.table("positions").upsert({
                 "symbol": symbol,
                 "mode": mode,
+                "market_type": market_type,
+                "side": data.get("side", "long"),
+                "leverage": data.get("leverage", 1),
+                "liquidation_price": data.get("liquidation_price"),
+                "margin_type": data.get("margin_type"),
                 "quantity": data.get("quantity", 0),
                 "entry_price": data.get("entry_price", 0),
                 "current_price": data.get("current_price", 0),
@@ -152,16 +171,39 @@ class SupabaseWriter:
                 "stop_loss": data.get("stop_loss"),
                 "take_profit": data.get("take_profit"),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
-            }, on_conflict="symbol,mode").execute()
+            }, on_conflict="symbol,mode,market_type,side").execute()
         except Exception as e:
             logger.debug("寫入 positions 失敗: %s", e)
 
-    def delete_position(self, symbol: str, mode: str = "live") -> None:
+    def load_positions(self, mode: str = "live",
+                       market_type: str = "spot") -> list[dict]:
+        """從 positions 表載入指定模式和市場類型的持倉，用於重啟恢復。"""
+        if not self._enabled:
+            return []
+        try:
+            cols = "symbol, quantity, entry_price, stop_loss, take_profit, side, leverage"
+            resp = (
+                self._client.table("positions")
+                .select(cols)
+                .eq("mode", mode)
+                .eq("market_type", market_type)
+                .execute()
+            )
+            return resp.data or []
+        except Exception as e:
+            logger.debug("讀取 positions 失敗: %s", e)
+            return []
+
+    def delete_position(self, symbol: str, mode: str = "live",
+                        market_type: str = "spot",
+                        side: str = "long") -> None:
         if not self._enabled:
             return
         try:
             (self._client.table("positions").delete()
-             .eq("symbol", symbol).eq("mode", mode).execute())
+             .eq("symbol", symbol).eq("mode", mode)
+             .eq("market_type", market_type).eq("side", side)
+             .execute())
         except Exception as e:
             logger.debug("刪除 position 失敗: %s", e)
 
@@ -198,16 +240,50 @@ class SupabaseWriter:
         except Exception as e:
             logger.debug("更新 loan_health action 失敗: %s", e)
 
+    # ─── Loan Adjust History（從幣安 API 同步）───
+
+    def sync_loan_adjustments(self, rows: list[dict]) -> int:
+        """同步借貸 LTV 調整歷史，返回新增筆數。利用 UNIQUE 約束去重。"""
+        if not self._enabled or not rows:
+            return 0
+        inserted = 0
+        for row in rows:
+            try:
+                self._client.table("loan_adjust_history").insert({
+                    "loan_coin": row.get("loanCoin", ""),
+                    "collateral_coin": row.get("collateralCoin", ""),
+                    "direction": row.get("direction", ""),
+                    "amount": float(row.get("amount", 0)),
+                    "pre_ltv": float(row.get("preLTV", 0)),
+                    "after_ltv": float(row.get("afterLTV", 0)),
+                    "adjust_time": datetime.fromtimestamp(
+                        int(row.get("adjustTime", 0)) / 1000, tz=timezone.utc
+                    ).isoformat(),
+                }).execute()
+                inserted += 1
+            except Exception as e:
+                # 唯一約束衝突表示已同步，跳過
+                if "duplicate" in str(e).lower() or "23505" in str(e):
+                    continue
+                logger.debug("寫入 loan_adjust_history 失敗: %s", e)
+        return inserted
+
     # ─── Bot Logs（批次寫入）───
 
     def insert_log(self, level: str, module: str, message: str) -> None:
         if not self._enabled:
             return
+        # 每筆日誌帶上 Python 端時間戳 + 遞增毫秒偏移
+        # JS Date 只有毫秒精度，微秒會被截斷，所以用毫秒
+        from datetime import timedelta
         with self._log_lock:
+            self._log_seq += 1
+            ts = datetime.now(timezone.utc) + timedelta(milliseconds=self._log_seq % 1000)
             self._log_buffer.append({
                 "level": level,
                 "module": module,
                 "message": message[:2000],
+                "created_at": ts.isoformat(),
             })
         self._maybe_flush_logs()
 
@@ -281,6 +357,24 @@ class SupabaseWriter:
 
     # ─── Bot Status / 心跳 ───
 
+    def get_last_cycle_num(self) -> int:
+        """從 bot_status 取得上次最大 cycle_num，用於重啟接續。"""
+        if not self._enabled:
+            return 0
+        try:
+            resp = (
+                self._client.table("bot_status")
+                .select("cycle_num")
+                .order("cycle_num", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if resp.data:
+                return resp.data[0].get("cycle_num", 0)
+        except Exception as e:
+            logger.debug("讀取 bot_status cycle_num 失敗: %s", e)
+        return 0
+
     def update_bot_status(self, cycle_num: int, status: str = "running",
                           config_ver: int = 0, pairs: list[str] | None = None,
                           uptime_sec: int = 0) -> None:
@@ -296,3 +390,39 @@ class SupabaseWriter:
             }).execute()
         except Exception as e:
             logger.debug("寫入 bot_status 失敗: %s", e)
+
+    # ─── Futures Funding ───
+
+    def insert_futures_funding(self, symbol: str, funding_rate: float,
+                               funding_fee: float, position_size: float) -> None:
+        if not self._enabled:
+            return
+        try:
+            self._client.table("futures_funding").insert({
+                "symbol": symbol,
+                "funding_rate": funding_rate,
+                "funding_fee": funding_fee,
+                "position_size": position_size,
+            }).execute()
+        except Exception as e:
+            logger.debug("寫入 futures_funding 失敗: %s", e)
+
+    # ─── Futures Margin ───
+
+    def insert_futures_margin(self, wallet_balance: float,
+                              available_balance: float,
+                              unrealized_pnl: float,
+                              margin_balance: float,
+                              margin_ratio: float) -> None:
+        if not self._enabled:
+            return
+        try:
+            self._client.table("futures_margin").insert({
+                "total_wallet_balance": wallet_balance,
+                "available_balance": available_balance,
+                "total_unrealized_pnl": unrealized_pnl,
+                "total_margin_balance": margin_balance,
+                "margin_ratio": margin_ratio,
+            }).execute()
+        except Exception as e:
+            logger.debug("寫入 futures_margin 失敗: %s", e)

@@ -528,6 +528,7 @@ class TradingBot:
             return
 
         # ── 4. LLM 決策 或 加權投票 ──
+        self._llm_override = False
         final_signal, final_confidence = self._make_decision(
             verdicts, symbol, current_price, cycle_id
         )
@@ -580,6 +581,10 @@ class TradingBot:
             if not risk_output.approved:
                 logger.info("%s風控拒絕: %s", _L2, risk_output.reason)
                 return
+            # LLM 覆蓋策略時倉位縮半
+            if self._llm_override and risk_output.quantity > 0:
+                risk_output.quantity /= 2
+                logger.info("%s[覆蓋] 倉位縮半: %.6f", _L2, risk_output.quantity)
             self._execute_buy(symbol, current_price, risk_output, cycle_id)
 
         elif final_signal == Signal.SELL:
@@ -616,7 +621,7 @@ class TradingBot:
                 self._db.insert_llm_decision(
                     symbol, decision.action, decision.confidence,
                     decision.reasoning, self.settings.llm.model,
-                    cycle_id,
+                    cycle_id, market_type=market_type,
                 )
                 logger.info(
                     "%s[LLM] %s (信心 %.2f) — %s",
@@ -627,7 +632,26 @@ class TradingBot:
                     "BUY": Signal.BUY, "SELL": Signal.SELL,
                     "SHORT": Signal.SHORT, "COVER": Signal.COVER,
                 }
-                return action_map.get(decision.action, Signal.HOLD), decision.confidence
+                llm_signal = action_map.get(decision.action, Signal.HOLD)
+
+                # 有條件覆蓋：LLM 方向無策略支持時，要求高信心
+                strategy_signals = {v.signal for v in verdicts}
+                if llm_signal != Signal.HOLD and llm_signal not in strategy_signals:
+                    if decision.confidence >= 0.7:
+                        logger.warning(
+                            "%s[LLM] 覆蓋策略: %s (信心 %.2f)，無策略支持（策略: %s）→ 倉位縮半",
+                            _L2, decision.action, decision.confidence,
+                            ", ".join(s.value for s in strategy_signals),
+                        )
+                        self._llm_override = True
+                    else:
+                        logger.warning(
+                            "%s[LLM] 決策 %s 無策略支持且信心不足 (%.2f < 0.7) → HOLD",
+                            _L2, decision.action, decision.confidence,
+                        )
+                        return Signal.HOLD, 0.0
+
+                return llm_signal, decision.confidence
             except Exception as e:
                 logger.warning("%sLLM 決策失敗 → HOLD: %s", _L2, e)
 
@@ -855,6 +879,7 @@ class TradingBot:
                 self._db.insert_verdict(
                     symbol, strategy.name, verdict.signal.value,
                     verdict.confidence, verdict.reasoning, cycle_id,
+                    market_type="futures",
                 )
 
         verdicts = self.router.get_verdicts()
@@ -867,6 +892,7 @@ class TradingBot:
             return
 
         # 先做 LLM 審查（用現有 LLM 引擎，傳入 market_type="futures"）
+        self._llm_override = False
         final_signal, final_confidence = self._make_decision(
             verdicts, symbol, current_price, cycle_id,
             market_type="futures",

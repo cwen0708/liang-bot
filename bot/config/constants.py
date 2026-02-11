@@ -31,8 +31,23 @@ VALID_TIMEFRAMES = [
     "1d", "3d", "1w", "1M",
 ]
 
+class MarketType(str, Enum):
+    """交易市場類型。"""
+    SPOT = "spot"
+    FUTURES = "futures"
+
+
+class PositionSide(str, Enum):
+    """持倉方向。"""
+    LONG = "long"
+    SHORT = "short"
+
+
 # 幣安現貨最低交易額（USDT）
 MIN_NOTIONAL_USDT = 10.0
+
+# 幣安 USDT-M 合約最低交易額
+MIN_NOTIONAL_FUTURES_USDT = 5.0
 
 # API 重試設定
 MAX_RETRIES = 3

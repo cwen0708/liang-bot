@@ -8,12 +8,12 @@ const bot = useBotStore()
 const { isDark, toggleTheme } = useTheme()
 const mobileMenuOpen = ref(false)
 
-onMounted(async () => {
-  // Prices must load before loans so netLoanValue doesn't show negative
+onMounted(() => {
+  // Prices cached in localStorage, so all fetches can run in parallel
   bot.fetchStatus()
   bot.fetchPositions()
+  bot.fetchLatestPrices()
   bot.fetchBalances()
-  await bot.fetchLatestPrices()
   bot.fetchLoans()
   bot.subscribeRealtime()
 })

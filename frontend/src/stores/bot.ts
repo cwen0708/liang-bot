@@ -14,6 +14,16 @@ export const useBotStore = defineStore('bot', () => {
   const loans = ref<LoanHealth[]>([])
   const pricesReady = ref(false)
 
+  // Restore cached prices from localStorage on init
+  const PRICES_CACHE_KEY = 'bot:latestPrices'
+  try {
+    const cached = localStorage.getItem(PRICES_CACHE_KEY)
+    if (cached) {
+      latestPrices.value = JSON.parse(cached)
+      pricesReady.value = true
+    }
+  } catch { /* ignore */ }
+
   const isOnline = computed(() => {
     if (!status.value) return false
     const updatedAt = new Date(status.value.updated_at).getTime()
@@ -72,6 +82,7 @@ export const useBotStore = defineStore('bot', () => {
       }
     }
     pricesReady.value = true
+    try { localStorage.setItem(PRICES_CACHE_KEY, JSON.stringify(latestPrices.value)) } catch { /* ignore */ }
   }
 
   async function fetchBalances() {
@@ -145,6 +156,7 @@ export const useBotStore = defineStore('bot', () => {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'market_snapshots' }, (p) => {
         const snap = p.new as MarketSnapshot
         latestPrices.value[snap.symbol] = snap.price
+        try { localStorage.setItem(PRICES_CACHE_KEY, JSON.stringify(latestPrices.value)) } catch { /* ignore */ }
       })
       .subscribe()
 

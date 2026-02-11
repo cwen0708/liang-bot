@@ -34,6 +34,13 @@ const historyByPair = computed(() => {
 
 const pairKeys = computed(() => [...historyByPair.value.keys()].sort())
 
+// 有操作的記錄（protect / take_profit），按時間降序
+const actionHistory = computed(() =>
+  loanHistory.value
+    .filter(l => l.action_taken !== 'none')
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+)
+
 const latestPerPair = computed(() => {
   const map = new Map<string, LoanHealth>()
   for (const l of loanHistory.value) {
@@ -42,6 +49,14 @@ const latestPerPair = computed(() => {
   }
   return map
 })
+
+function formatTime(ts: string) {
+  return new Date(ts).toLocaleString('zh-TW', {
+    month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+    hour12: false,
+  })
+}
 
 function ltvColor(ltv: number) {
   if (ltv >= DANGER_LTV) return 'text-(--color-danger)'
@@ -281,6 +296,38 @@ onUnmounted(() => {
           class="mt-2 w-full"
           style="height: 90px"
         />
+      </div>
+    </div>
+
+    <!-- 操作歷史 -->
+    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
+      <h3 class="text-base font-semibold text-(--color-text-secondary) uppercase mb-3">操作歷史</h3>
+      <div v-if="!actionHistory.length" class="text-base text-(--color-text-secondary)">尚無操作記錄</div>
+      <div v-else class="space-y-2">
+        <div
+          v-for="a in actionHistory"
+          :key="a.id"
+          class="flex items-center justify-between py-2 px-3 rounded-lg bg-(--color-bg-secondary)"
+        >
+          <div class="flex items-center gap-3">
+            <span
+              class="inline-flex items-center px-2 py-0.5 rounded text-sm font-bold"
+              :class="a.action_taken === 'protect'
+                ? 'bg-(--color-warning)/15 text-(--color-warning)'
+                : 'bg-(--color-success)/15 text-(--color-success)'"
+            >
+              {{ a.action_taken === 'protect' ? '保護' : '獲利了結' }}
+            </span>
+            <span class="text-base font-medium">{{ a.collateral_coin }}/{{ a.loan_coin }}</span>
+          </div>
+          <div class="text-right">
+            <div class="text-sm">
+              LTV <span class="font-mono font-bold" :class="ltvColor(a.ltv)">{{ (a.ltv * 100).toFixed(1) }}%</span>
+              <span class="text-(--color-text-secondary) ml-2">質押 {{ a.collateral_amount.toFixed(4) }} · 負債 {{ a.total_debt.toFixed(2) }}</span>
+            </div>
+            <div class="text-sm text-(--color-text-secondary)">{{ formatTime(a.created_at) }}</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>

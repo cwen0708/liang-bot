@@ -7,8 +7,9 @@ from bot.config.settings import LLMConfig
 from bot.llm.client import ClaudeCLIClient
 from bot.llm.prompts import build_decision_prompt
 from bot.llm.schemas import LLMDecision, PortfolioState
-from bot.llm.summarizer import summarize_portfolio, summarize_verdicts
+from bot.llm.summarizer import summarize_portfolio, summarize_risk_metrics, summarize_verdicts
 from bot.logging_config import get_logger
+from bot.risk.metrics import RiskMetrics
 from bot.strategy.signals import Signal, StrategyVerdict
 
 logger = get_logger("llm.decision_engine")
@@ -38,6 +39,7 @@ class LLMDecisionEngine:
         symbol: str,
         current_price: float,
         market_type: str = "spot",
+        risk_metrics: RiskMetrics | None = None,
     ) -> LLMDecision:
         """
         根據策略結論和倉位狀態做出 LLM 決策。
@@ -60,6 +62,9 @@ class LLMDecisionEngine:
             # 1. 摘要化
             strategy_summary = summarize_verdicts(verdicts)
             portfolio_summary = summarize_portfolio(portfolio)
+            risk_summary = ""
+            if risk_metrics is not None:
+                risk_summary = summarize_risk_metrics(risk_metrics, symbol, current_price)
 
             # 2. 組建提示詞
             prompt = build_decision_prompt(
@@ -68,6 +73,7 @@ class LLMDecisionEngine:
                 symbol=symbol,
                 current_price=current_price,
                 market_type=market_type,
+                risk_metrics_summary=risk_summary,
             )
 
             # 3. 呼叫 LLM
@@ -92,11 +98,12 @@ class LLMDecisionEngine:
         symbol: str,
         current_price: float,
         market_type: str = "spot",
+        risk_metrics: RiskMetrics | None = None,
     ) -> LLMDecision:
         """同步版本的 decide。"""
         import asyncio
         return asyncio.run(
-            self.decide(verdicts, portfolio, symbol, current_price, market_type),
+            self.decide(verdicts, portfolio, symbol, current_price, market_type, risk_metrics),
         )
 
     @staticmethod

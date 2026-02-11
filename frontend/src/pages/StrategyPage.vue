@@ -139,8 +139,9 @@ function closeDrawer() {
   <div class="p-4 md:p-6 md:pb-0 flex flex-col gap-4 md:gap-6 md:h-[calc(100vh)] md:overflow-hidden">
     <!-- Header -->
     <div class="flex items-center justify-between shrink-0">
+      <h2 class="text-2xl md:text-3xl font-bold">策略</h2>
       <div class="flex items-center gap-3">
-        <h2 class="text-2xl md:text-3xl font-bold">策略</h2>
+        <span class="text-sm text-(--color-text-muted)">{{ filteredDecisions.length }} 筆決策</span>
         <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
           <button
             class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
@@ -158,7 +159,6 @@ function closeDrawer() {
           >合約</button>
         </div>
       </div>
-      <div class="text-sm text-(--color-text-muted)">{{ filteredDecisions.length }} 筆決策</div>
     </div>
 
     <!-- Loading -->

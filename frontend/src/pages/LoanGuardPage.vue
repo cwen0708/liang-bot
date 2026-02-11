@@ -33,7 +33,15 @@ const historyByPair = computed(() => {
   return map
 })
 
-const pairKeys = computed(() => [...historyByPair.value.keys()].sort())
+const pairKeys = computed(() => {
+  const keys = [...historyByPair.value.keys()]
+  // 依最新 LTV 大到小排序
+  return keys.sort((a, b) => {
+    const ltvA = latestPerPair.value.get(a)?.ltv ?? 0
+    const ltvB = latestPerPair.value.get(b)?.ltv ?? 0
+    return ltvB - ltvA
+  })
+})
 
 // 調整歷史（從幣安 API 同步），按時間降序
 const sortedAdjustHistory = computed(() =>
@@ -239,7 +247,7 @@ onUnmounted(() => {
 
 <template>
   <div class="p-4 md:p-6 space-y-4 md:space-y-6">
-    <h2 class="text-2xl md:text-3xl font-bold">借貸監控</h2>
+    <h2 class="text-2xl md:text-3xl font-bold">借貸</h2>
 
     <div v-if="loading" class="text-base text-(--color-text-secondary)">載入中...</div>
     <div v-else-if="!pairKeys.length" class="text-base text-(--color-text-secondary)">無借貸記錄</div>

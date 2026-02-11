@@ -527,10 +527,30 @@ class TradingBot:
             logger.info("%s無策略結論，跳過", _L2)
             return
 
-        # ── 4. LLM 決策 或 加權投票 ──
+        # ── 4. 預計算風控指標（供 LLM 參考） ──
+        risk_metrics = None
+        non_hold = [v for v in verdicts if v.signal != Signal.HOLD]
+        if non_hold:
+            primary_signal = non_hold[0].signal
+            if primary_signal == Signal.BUY:
+                try:
+                    balance = self.exchange.get_balance()
+                    usdt_balance = balance.get("USDT", 0.0)
+                    risk_metrics = self.risk_manager.pre_calculate_metrics(
+                        signal=primary_signal,
+                        symbol=symbol,
+                        price=current_price,
+                        balance=usdt_balance,
+                        ohlcv=df,
+                    )
+                except Exception as e:
+                    logger.warning("%s預計算風控指標失敗: %s", _L2, e)
+
+        # ── 5. LLM 決策 或 加權投票 ──
         self._llm_override = False
         final_signal, final_confidence = self._make_decision(
-            verdicts, symbol, current_price, cycle_id
+            verdicts, symbol, current_price, cycle_id,
+            risk_metrics=risk_metrics,
         )
 
         if final_signal == Signal.HOLD:
@@ -597,6 +617,7 @@ class TradingBot:
         current_price: float,
         cycle_id: str = "",
         market_type: str = "spot",
+        risk_metrics: "RiskMetrics | None" = None,
     ) -> tuple[Signal, float]:
         """所有非 HOLD 決策強制過 LLM 審查；LLM 失敗直接 HOLD。"""
         non_hold = [v for v in verdicts if v.signal != Signal.HOLD]
@@ -617,6 +638,7 @@ class TradingBot:
                     symbol=symbol,
                     current_price=current_price,
                     market_type=market_type,
+                    risk_metrics=risk_metrics,
                 )
                 self._db.insert_llm_decision(
                     symbol, decision.action, decision.confidence,
@@ -886,16 +908,37 @@ class TradingBot:
         if not verdicts:
             return
 
-        # ── 4. 訊號轉換 + LLM 決策 ──
+        # ── 4. 預計算合約風控指標（供 LLM 參考） ──
         non_hold = [v for v in verdicts if v.signal != Signal.HOLD]
         if not non_hold:
             return
+
+        risk_metrics = None
+        primary_signal = non_hold[0].signal
+        if primary_signal in (Signal.BUY, Signal.SHORT):
+            side = "long" if primary_signal == Signal.BUY else "short"
+            try:
+                balance = self._futures_exchange.get_futures_balance()
+                available = balance["available_balance"]
+                margin_ratio = self._futures_exchange.get_margin_ratio()
+                risk_metrics = self._futures_risk.pre_calculate_metrics(
+                    signal=primary_signal,
+                    symbol=symbol,
+                    side=side,
+                    price=current_price,
+                    available_margin=available,
+                    margin_ratio=margin_ratio,
+                    ohlcv=df,
+                )
+            except Exception as e:
+                logger.warning("%s[合約] 預計算風控指標失敗: %s", _L2, e)
 
         # 先做 LLM 審查（用現有 LLM 引擎，傳入 market_type="futures"）
         self._llm_override = False
         final_signal, final_confidence = self._make_decision(
             verdicts, symbol, current_price, cycle_id,
             market_type="futures",
+            risk_metrics=risk_metrics,
         )
 
         if final_signal == Signal.HOLD:

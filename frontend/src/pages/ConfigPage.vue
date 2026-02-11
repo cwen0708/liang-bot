@@ -26,6 +26,12 @@ const DEFAULT_SCHEMA: Record<string, SchemaEntry> = {
   'spot.take_profit_pct':             { label: '停利', type: 'percent', step: 0.01, desc: '持倉獲利達此百分比時自動賣出止盈。例如 6% 表示獲利超過買入價的 6% 即觸發停利' },
   'spot.max_open_positions':          { label: '最大持倉數', type: 'integer', desc: '同時持有的最大倉位數量。超過此數量時不會開新倉，避免過度分散資金' },
   'spot.max_daily_loss_pct':          { label: '每日虧損上限', type: 'percent', step: 0.01, desc: '當日累計虧損達此百分比時，Bot 停止開新倉直到隔日。防止單日過度損失' },
+  'spot.min_risk_reward':             { label: '最低盈虧比', type: 'number', step: 0.1, desc: '開倉前的盈虧比 (R:R) 最低門檻。例如 1.5 表示潛在獲利必須是潛在虧損的 1.5 倍以上才開倉' },
+  'spot.atr':                         { label: 'ATR 動態停損', desc: 'ATR（平均真實波幅）動態停損停利配置。啟用後停損停利距離會根據市場波動自動調整' },
+  'spot.atr.enabled':                 { label: '啟用動態 SL/TP', type: 'boolean', desc: '啟用 ATR 動態停損停利。關閉則使用固定百分比（stop_loss_pct / take_profit_pct）。建議開啟以適應不同市場波動度' },
+  'spot.atr.period':                  { label: '計算週期', type: 'integer', desc: 'ATR 計算的 K 線回看週期（預設 14）。用於動態計算停損停利距離' },
+  'spot.atr.sl_multiplier':           { label: '停損倍率', type: 'number', step: 0.1, desc: '停損距離 = ATR × 此倍率。例如 1.5 表示停損設在 1.5 倍 ATR 距離' },
+  'spot.atr.tp_multiplier':           { label: '停利倍率', type: 'number', step: 0.1, desc: '停利距離 = ATR × 此倍率。與停損倍率的比值決定盈虧比（例如 3.0/1.5=2.0）' },
   // Backtest
   'backtest':                         { label: '回測設定', desc: '歷史回測引擎的參數，用於驗證策略在過往數據上的表現' },
   'backtest.start_date':              { label: '起始日期', type: 'string', desc: '回測的開始日期，格式 YYYY-MM-DD' },
@@ -43,7 +49,7 @@ const DEFAULT_SCHEMA: Record<string, SchemaEntry> = {
   'orderflow.absorption_lookback':    { label: '吸收量回看', type: 'integer', desc: '大單吸收偵測的回看期。當價格不動但成交量異常放大，可能代表大戶在吸收賣壓' },
   'orderflow.signal_threshold':       { label: '信號閾值', type: 'number', step: 0.1, desc: 'Order Flow 綜合信號的觸發閾值。數值越高要求越強的信號才會發出 BUY/SELL' },
   // Strategies array
-  'strategies':                       { label: '多策略列表', desc: '啟用的策略清單，每個策略獨立執行並產生信號，最終由路由器彙整' },
+  'strategies':                       { label: '現貨策略', desc: '現貨交易使用的策略清單，每個策略獨立執行並產生信號，最終由 LLM 彙整決策' },
   // LLM
   'llm':                              { label: 'LLM 決策引擎', desc: '所有非 HOLD 信號強制經過 LLM（Claude）審核，作為最終買賣決策的把關者' },
   'llm.enabled':                      { label: '啟用 LLM', type: 'boolean', desc: '開啟後所有 BUY/SELL 信號會送交 Claude 進行 AI 審核。關閉則直接執行策略信號' },

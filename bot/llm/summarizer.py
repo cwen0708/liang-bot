@@ -1,6 +1,9 @@
-"""策略結論 + 倉位狀態 → Markdown 摘要。"""
+"""策略結論 + 倉位狀態 + 風控指標 → Markdown 摘要。"""
+
+from __future__ import annotations
 
 from bot.llm.schemas import PortfolioState
+from bot.risk.metrics import RiskMetrics
 from bot.strategy.signals import StrategyVerdict
 
 
@@ -75,5 +78,76 @@ def summarize_portfolio(state: PortfolioState) -> str:
                 )
     else:
         lines.append("\n目前無持倉。")
+
+    return "\n".join(lines)
+
+
+def summarize_risk_metrics(
+    metrics: RiskMetrics,
+    symbol: str,
+    current_price: float,
+) -> str:
+    """將預計算的風控指標轉為 Markdown（供 LLM 參考）。"""
+    lines = ["## 風控指標評估\n"]
+
+    # ATR + SL/TP + R:R
+    sl_pct = metrics.sl_distance / current_price if current_price > 0 else 0
+    tp_pct = metrics.tp_distance / current_price if current_price > 0 else 0
+    mode = "ATR 動態" if metrics.atr_used else "固定百分比"
+
+    lines.append(f"### 停損停利（{mode}）")
+    lines.append(f"- 停損價: {metrics.stop_loss_price:,.2f} (-{sl_pct:.2%})")
+    lines.append(f"- 停利價: {metrics.take_profit_price:,.2f} (+{tp_pct:.2%})")
+    lines.append(f"- 盈虧比 (R:R): {metrics.risk_reward_ratio:.2f}")
+    if metrics.atr_used:
+        lines.append(f"- ATR: {metrics.atr_value:,.2f}")
+
+    # Fibonacci
+    fib = metrics.fib_levels
+    if fib:
+        lines.append("\n### Fibonacci 回撤位")
+        fib_parts = []
+        for ratio in ["0.236", "0.382", "0.500", "0.618", "0.786"]:
+            if ratio in fib:
+                fib_parts.append(f"{ratio}: {fib[ratio]:,.2f}")
+        if fib_parts:
+            lines.append("- " + " | ".join(fib_parts))
+
+    # 支撐壓力位
+    if metrics.support_levels or metrics.resistance_levels:
+        lines.append("\n### 支撐壓力位")
+        if metrics.support_levels:
+            levels = ", ".join(f"{p:,.2f}" for p in metrics.support_levels)
+            lines.append(f"- 支撐: {levels}")
+        if metrics.resistance_levels:
+            levels = ", ".join(f"{p:,.2f}" for p in metrics.resistance_levels)
+            lines.append(f"- 壓力: {levels}")
+
+    # 布林帶
+    if metrics.bb_upper > 0:
+        lines.append("\n### 布林帶")
+        lines.append(
+            f"- 上軌: {metrics.bb_upper:,.2f} | "
+            f"中軌: {metrics.bb_mid:,.2f} | "
+            f"下軌: {metrics.bb_lower:,.2f}"
+        )
+        if metrics.bb_pct_b <= 0.2:
+            bb_hint = "接近下軌（超賣區）"
+        elif metrics.bb_pct_b >= 0.8:
+            bb_hint = "接近上軌（超買區）"
+        else:
+            bb_hint = "中間區域"
+        lines.append(f"- %B: {metrics.bb_pct_b:.2f}（{bb_hint}）")
+
+    # 合約專用
+    if metrics.leverage > 1:
+        lines.append("\n### 合約風險")
+        lines.append(f"- 槓桿: {metrics.leverage}x")
+        lines.append(f"- 預估清算價: {metrics.liquidation_price:,.2f}")
+        lines.append(f"- 帳戶風險: {metrics.account_risk_pct:.2%} (單筆)")
+
+    # 警告
+    if not metrics.passes_min_rr or metrics.reason:
+        lines.append(f"\n⚠️ **風控警告**: {metrics.reason}")
 
     return "\n".join(lines)

@@ -105,33 +105,29 @@ function calcPnl(pos: { symbol: string; entry_price: number; quantity: number; c
 
 <template>
   <div class="p-4 md:p-6 flex flex-col gap-4 md:gap-6 md:h-[calc(100vh)] md:overflow-hidden">
-    <!-- Header + Mode toggle -->
-    <div class="flex flex-col gap-3 shrink-0">
-      <div class="flex items-center justify-between gap-2">
-        <h2 class="text-2xl md:text-3xl font-bold">現貨</h2>
-      </div>
-
-      <!-- Status filters -->
-      <div class="flex gap-1">
+    <!-- Header + Status filters -->
+    <div class="flex items-center justify-between gap-2 shrink-0">
+      <h2 class="text-2xl md:text-3xl font-bold">現貨</h2>
+      <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
         <button
-          class="px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
           :class="!filterStatus
-            ? 'bg-(--color-accent) text-white'
-            : 'bg-(--color-bg-card) border border-(--color-border) text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
           @click="filterStatus = ''"
         >全部</button>
         <button
-          class="px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
           :class="filterStatus === 'filled'
-            ? 'bg-(--color-success)/80 text-white'
-            : 'bg-(--color-bg-card) border border-(--color-border) text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
           @click="filterStatus = 'filled'"
         >已成交</button>
         <button
-          class="px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
           :class="filterStatus === 'cancelled'
-            ? 'bg-(--color-text-secondary)/80 text-white'
-            : 'bg-(--color-bg-card) border border-(--color-border) text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
           @click="filterStatus = 'cancelled'"
         >已取消</button>
       </div>

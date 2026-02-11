@@ -14,6 +14,7 @@ const { isDark } = useTheme()
 const chartContainer = ref<HTMLElement>()
 const selectedSymbol = ref('BTC/USDT')
 const filterMode = computed(() => bot.globalMode)
+const marketTab = ref<'spot' | 'futures'>('spot')
 const chartInterval = ref('5m')
 const intervalOptions = [
   { value: '1m', label: '1分', ws: '1m' },
@@ -30,6 +31,33 @@ let lineSeries: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let markersPrimitive: any = null
 let ws: WebSocket | null = null
+
+onMounted(() => {
+  if (!bot.spotPairs.length) bot.fetchConfigPairs()
+})
+
+// 依設定檔交易對篩選
+const filteredPrices = computed(() => {
+  const pairs = marketTab.value === 'spot' ? bot.spotPairs : bot.futuresPairs
+  if (!pairs.length) return bot.latestPrices
+  const result: Record<string, number> = {}
+  for (const p of pairs) {
+    if (bot.latestPrices[p] != null) result[p] = bot.latestPrices[p]
+  }
+  return result
+})
+
+// Binance API base URLs
+const restBase = computed(() =>
+  marketTab.value === 'futures'
+    ? 'https://fapi.binance.com/fapi/v1/klines'
+    : 'https://api.binance.com/api/v3/klines',
+)
+const wsBase = computed(() =>
+  marketTab.value === 'futures'
+    ? 'wss://fstream.binance.com/ws/'
+    : 'wss://stream.binance.com:9443/ws/',
+)
 
 // Order markers state
 const symbolOrders = ref<Order[]>([])
@@ -55,7 +83,7 @@ async function loadChartData() {
   if (!chart || !lineSeries) return
 
   const symbol = toBinanceRest(selectedSymbol.value)
-  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${chartInterval.value}&limit=1000`
+  const url = `${restBase.value}?symbol=${symbol}&interval=${chartInterval.value}&limit=1000`
 
   try {
     const resp = await fetch(url)
@@ -88,7 +116,7 @@ function connectWebSocket() {
 
   const symbol = toBinanceWs(selectedSymbol.value)
   const wsInterval = intervalOptions.find(o => o.value === chartInterval.value)?.ws ?? '5m'
-  ws = new WebSocket(`wss://stream.binance.com:9443/ws/${symbol}@kline_${wsInterval}`)
+  ws = new WebSocket(`${wsBase.value}${symbol}@kline_${wsInterval}`)
 
   ws.onmessage = (event) => {
     try {
@@ -116,6 +144,7 @@ async function loadOrders() {
     .select('*')
     .eq('symbol', selectedSymbol.value)
     .eq('mode', filterMode.value)
+    .eq('market_type', marketTab.value)
     .order('created_at', { ascending: true })
     .limit(50)
 
@@ -161,7 +190,11 @@ function updatePositionLines() {
   }
   priceLines = []
 
-  const pos = bot.positions.find((p) => p.symbol === selectedSymbol.value && (p.mode ?? 'live') === filterMode.value)
+  const pos = bot.positions.find((p) =>
+    p.symbol === selectedSymbol.value
+    && (p.mode ?? 'live') === filterMode.value
+    && (p.market_type ?? 'spot') === marketTab.value,
+  )
   if (!pos) return
 
   const accentColor = getCSSVar('--color-accent')
@@ -258,7 +291,7 @@ onMounted(() => {
     .channel('chart:orders')
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' }, (p) => {
       const newOrder = p.new as Order
-      if (newOrder.symbol === selectedSymbol.value && (newOrder.mode ?? 'live') === filterMode.value) {
+      if (newOrder.symbol === selectedSymbol.value && (newOrder.mode ?? 'live') === filterMode.value && (newOrder.market_type ?? 'spot') === marketTab.value) {
         symbolOrders.value.push(newOrder)
         applyMarkers()
       }
@@ -283,8 +316,8 @@ onMounted(() => {
   })
 })
 
-// Symbol or interval change → reload chart + reconnect WS
-watch([selectedSymbol, chartInterval], () => {
+// Symbol, interval or market tab change → reload chart + reconnect WS
+watch([selectedSymbol, chartInterval, marketTab], () => {
   if (markersPrimitive) {
     markersPrimitive.detach()
     markersPrimitive = null
@@ -305,6 +338,14 @@ watch(filterMode, () => {
 
 watch(() => bot.positions, () => updatePositionLines(), { deep: true })
 
+// Market tab change → select first pair of that tab
+watch(marketTab, () => {
+  const pairs = marketTab.value === 'spot' ? bot.spotPairs : bot.futuresPairs
+  if (pairs.length && !pairs.includes(selectedSymbol.value)) {
+    selectedSymbol.value = pairs[0]!
+  }
+})
+
 watch(isDark, async () => {
   await nextTick()
   applyChartTheme()
@@ -315,6 +356,22 @@ watch(isDark, async () => {
   <div class="p-4 md:p-6 space-y-4 md:space-y-6">
     <div class="flex items-center justify-between gap-2">
       <h2 class="text-2xl md:text-3xl font-bold">行情</h2>
+      <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
+        <button
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+          :class="marketTab === 'spot'
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="marketTab = 'spot'"
+        >現貨</button>
+        <button
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+          :class="marketTab === 'futures'
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="marketTab = 'futures'"
+        >合約</button>
+      </div>
     </div>
 
     <!-- Chart: Binance live kline -->
@@ -335,7 +392,7 @@ watch(isDark, async () => {
 
     <!-- Price Cards -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-      <div v-for="(price, symbol) in bot.latestPrices" :key="symbol"
+      <div v-for="(price, symbol) in filteredPrices" :key="symbol"
            class="bg-(--color-bg-card) border rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none cursor-pointer transition-colors"
            :class="selectedSymbol === symbol
              ? 'border-(--color-accent) ring-1 ring-(--color-accent)/30'

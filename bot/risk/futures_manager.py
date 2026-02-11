@@ -9,6 +9,7 @@ import pandas as pd
 
 from bot.config.settings import FuturesConfig
 from bot.logging_config import get_logger
+from bot.risk.metrics import RiskMetrics
 from bot.strategy.signals import Signal
 
 logger = get_logger("risk.futures_manager")
@@ -60,29 +61,113 @@ class FuturesRiskManager:
 
     @staticmethod
     def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
-        """從 OHLCV DataFrame 計算 ATR（Average True Range）。
+        """從 OHLCV DataFrame 計算 ATR。委派至共用工具。"""
+        from bot.utils.indicators import compute_atr
+        return compute_atr(df, period)
 
-        需要 columns: high, low, close。
-        返回最新一筆 ATR 值。
-        """
-        if df is None or len(df) < period + 1:
-            return 0.0
+    # ─── 預計算風控指標（LLM 決策前） ───
 
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
+    def pre_calculate_metrics(
+        self,
+        signal: Signal,
+        symbol: str,
+        side: str,
+        price: float,
+        available_margin: float,
+        margin_ratio: float,
+        ohlcv: pd.DataFrame | None = None,
+    ) -> RiskMetrics | None:
+        """預先計算合約風控指標，供 LLM 決策參考。"""
+        if signal not in (Signal.BUY, Signal.SHORT):
+            return None
 
-        # True Range = max(H-L, |H-prevC|, |L-prevC|)
-        prev_close = close.shift(1)
-        tr = pd.concat([
-            high - low,
-            (high - prev_close).abs(),
-            (low - prev_close).abs(),
-        ], axis=1).max(axis=1)
+        self._reset_daily_pnl_if_needed()
 
-        atr = tr.rolling(window=period).mean()
-        latest_atr = atr.iloc[-1]
-        return float(latest_atr) if pd.notna(latest_atr) else 0.0
+        # 基本風控檢查（僅標記）
+        reason = ""
+        if margin_ratio >= self.config.max_margin_ratio:
+            reason = f"保證金比率 {margin_ratio:.1%} >= {self.config.max_margin_ratio:.0%}"
+        elif self._daily_pnl < -(available_margin * self.config.max_daily_loss_pct):
+            reason = f"已達每日虧損限制 ({self.config.max_daily_loss_pct * 100:.1f}%)"
+        elif self.open_position_count >= self.config.max_open_positions:
+            reason = f"已達最大持倉數 ({self.config.max_open_positions})"
+        else:
+            pos_key = self._pos_key(symbol, side)
+            if pos_key in self._open_positions:
+                reason = f"已持有 {symbol} {side}"
+
+        # SL/TP
+        stop_loss, take_profit, sl_distance, tp_distance = self._calc_sl_tp(
+            side, price, ohlcv,
+        )
+        rr_ratio = tp_distance / sl_distance if sl_distance > 0 else 0.0
+        passes_rr = rr_ratio >= self.config.min_risk_reward
+        if not passes_rr and not reason:
+            reason = f"R:R {rr_ratio:.2f} < {self.config.min_risk_reward:.1f}"
+
+        # ATR
+        from bot.utils.indicators import compute_atr as _compute_atr
+        atr_val = 0.0
+        if self.config.atr.enabled and ohlcv is not None:
+            atr_val = _compute_atr(ohlcv, self.config.atr.period)
+
+        # 清算價
+        leverage = self.config.leverage
+        if side == "long":
+            liq_price = price * (1 - 1 / leverage + self.MAINTENANCE_MARGIN_RATE)
+        else:
+            liq_price = price * (1 + 1 / leverage - self.MAINTENANCE_MARGIN_RATE)
+
+        # 帳戶風險
+        sl_pct = sl_distance / price if price > 0 else 0
+        account_risk_pct = sl_pct * leverage * self.config.max_position_pct
+
+        metrics = RiskMetrics(
+            stop_loss_price=stop_loss,
+            take_profit_price=take_profit,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            risk_reward_ratio=rr_ratio,
+            atr_value=atr_val,
+            atr_used=atr_val > 0 and self.config.atr.enabled,
+            leverage=leverage,
+            liquidation_price=liq_price,
+            account_risk_pct=account_risk_pct,
+            passes_min_rr=passes_rr,
+            reason=reason,
+        )
+
+        # Fibonacci
+        try:
+            from bot.utils.indicators import compute_fibonacci_levels
+            fib = compute_fibonacci_levels(ohlcv)
+            if fib:
+                metrics.fib_levels = fib
+        except Exception:
+            logger.debug("Fibonacci 計算失敗", exc_info=True)
+
+        # 支撐壓力位
+        try:
+            from bot.utils.indicators import compute_support_resistance
+            sr = compute_support_resistance(ohlcv)
+            metrics.support_levels = sr["support"]
+            metrics.resistance_levels = sr["resistance"]
+        except Exception:
+            logger.debug("支撐壓力位計算失敗", exc_info=True)
+
+        # 布林帶
+        try:
+            from bot.utils.indicators import compute_bollinger_bands
+            bb = compute_bollinger_bands(ohlcv)
+            if bb:
+                metrics.bb_upper = bb["upper"]
+                metrics.bb_mid = bb["mid"]
+                metrics.bb_lower = bb["lower"]
+                metrics.bb_pct_b = bb["pct_b"]
+        except Exception:
+            logger.debug("布林帶計算失敗", exc_info=True)
+
+        return metrics
 
     # ─── 評估入口 ───
 

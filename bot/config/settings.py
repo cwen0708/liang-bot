@@ -32,6 +32,8 @@ class SpotConfig:
     take_profit_pct: float = 0.06
     max_open_positions: int = 3
     max_daily_loss_pct: float = 0.05
+    atr: "AtrConfig" = field(default_factory=lambda: AtrConfig(enabled=False))
+    min_risk_reward: float = 1.5
 
 
 @dataclass(frozen=True)
@@ -249,6 +251,18 @@ class Settings:
         if timeframe not in VALID_TIMEFRAMES:
             raise ValueError(f"不支援的時間框架: {timeframe}，有效值: {VALID_TIMEFRAMES}")
 
+        # ATR 配置（現貨預設關閉）
+        atr_cfg = src.get("atr", {})
+        if atr_cfg and isinstance(atr_cfg, dict):
+            atr = AtrConfig(
+                period=atr_cfg.get("period", 14),
+                sl_multiplier=atr_cfg.get("sl_multiplier", 1.5),
+                tp_multiplier=atr_cfg.get("tp_multiplier", 3.0),
+                enabled=atr_cfg.get("enabled", False),
+            )
+        else:
+            atr = AtrConfig(enabled=False)
+
         return SpotConfig(
             mode=mode,
             pairs=tuple(src.get("pairs", ["BTC/USDT"])),
@@ -259,6 +273,8 @@ class Settings:
             take_profit_pct=src.get("take_profit_pct", 0.06),
             max_open_positions=src.get("max_open_positions", 3),
             max_daily_loss_pct=src.get("max_daily_loss_pct", 0.05),
+            atr=atr,
+            min_risk_reward=src.get("min_risk_reward", 1.5),
         )
 
     @staticmethod

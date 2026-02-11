@@ -12,6 +12,7 @@ export const useBotStore = defineStore('bot', () => {
   const balances = ref<AccountBalance[]>([])
   const totalUsdt = ref(0)
   const loans = ref<LoanHealth[]>([])
+  const pricesReady = ref(false)
 
   const isOnline = computed(() => {
     if (!status.value) return false
@@ -21,16 +22,21 @@ export const useBotStore = defineStore('bot', () => {
     return now - updatedAt < 300_000
   })
 
-  const netLoanValue = computed(() => {
+  const netLoanValue = computed<number | null>(() => {
+    if (!pricesReady.value || !loans.value.length) return null
     return loans.value.reduce((sum, loan) => {
       const priceKey = loan.collateral_coin + '/USDT'
       const price = latestPrices.value[priceKey] ?? 0
+      if (price === 0) return sum // skip if price not available
       const collateralUsdt = loan.collateral_amount * price
       return sum + (collateralUsdt - loan.total_debt)
     }, 0)
   })
 
-  const totalAssets = computed(() => totalUsdt.value + netLoanValue.value)
+  const totalAssets = computed<number | null>(() => {
+    if (netLoanValue.value === null) return null
+    return totalUsdt.value + netLoanValue.value
+  })
 
   async function fetchStatus() {
     const { data } = await supabase
@@ -65,6 +71,7 @@ export const useBotStore = defineStore('bot', () => {
         }
       }
     }
+    pricesReady.value = true
   }
 
   async function fetchBalances() {
@@ -160,6 +167,7 @@ export const useBotStore = defineStore('bot', () => {
     status,
     positions,
     latestPrices,
+    pricesReady,
     balances,
     totalUsdt,
     loans,

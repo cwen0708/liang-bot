@@ -26,7 +26,10 @@ function loanNetValue(l: LoanHealth) {
       <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
         <div class="text-sm text-(--color-text-secondary) uppercase">總資產</div>
         <div class="text-xl md:text-2xl font-bold mt-1">
-          ${{ bot.totalAssets.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}
+          <template v-if="bot.totalAssets !== null">
+            ${{ bot.totalAssets.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}
+          </template>
+          <span v-else class="text-(--color-text-muted)">--</span>
         </div>
         <div class="text-sm text-(--color-text-secondary) mt-1">
           {{ bot.isOnline ? '運行中' : '離線' }} · 第 {{ bot.status?.cycle_num ?? '-' }} 輪
@@ -46,10 +49,13 @@ function loanNetValue(l: LoanHealth) {
       <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
         <div class="text-sm text-(--color-text-secondary) uppercase">借貸</div>
         <div class="text-xl md:text-2xl font-bold mt-1" :class="{
-          'text-(--color-success)': bot.netLoanValue > 0,
-          'text-(--color-danger)': bot.netLoanValue < 0,
+          'text-(--color-success)': bot.netLoanValue !== null && bot.netLoanValue > 0,
+          'text-(--color-danger)': bot.netLoanValue !== null && bot.netLoanValue < 0,
         }">
-          ${{ bot.netLoanValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}
+          <template v-if="bot.netLoanValue !== null">
+            ${{ bot.netLoanValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}
+          </template>
+          <span v-else class="text-(--color-text-muted)">--</span>
         </div>
         <div class="text-sm text-(--color-text-secondary) mt-1">
           {{ bot.loans.length }} 筆借貸

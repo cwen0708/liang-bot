@@ -8,11 +8,12 @@ const bot = useBotStore()
 const { isDark, toggleTheme } = useTheme()
 const mobileMenuOpen = ref(false)
 
-onMounted(() => {
+onMounted(async () => {
+  // Prices must load before loans so netLoanValue doesn't show negative
   bot.fetchStatus()
   bot.fetchPositions()
-  bot.fetchLatestPrices()
   bot.fetchBalances()
+  await bot.fetchLatestPrices()
   bot.fetchLoans()
   bot.subscribeRealtime()
 })

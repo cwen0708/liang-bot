@@ -8,21 +8,31 @@ from bot.strategy.signals import StrategyVerdict
 from bot.utils.indicators import TimeframeSummary
 
 
-def summarize_verdicts(verdicts: list[StrategyVerdict]) -> str:
-    """將各策略的結論轉為結構化 Markdown。"""
+def summarize_verdicts(
+    verdicts: list[StrategyVerdict],
+    max_reasoning_chars: int = 500,
+) -> str:
+    """將各策略的結論轉為結構化 Markdown。
+
+    Args:
+        max_reasoning_chars: 每個策略推理文字最大長度，超過則截斷。
+    """
     if not verdicts:
         return "## 策略結論\n無可用的策略分析結果。\n"
 
     sections = ["## 策略結論\n"]
 
     for i, v in enumerate(verdicts, 1):
+        reasoning = v.reasoning[:max_reasoning_chars]
+        if len(v.reasoning) > max_reasoning_chars:
+            reasoning += "..."
         section = f"""### 策略 {i}: {v.strategy_name}
 - **建議**: {v.signal.value} (信心 {v.confidence:.2f})
-- **推理**: {v.reasoning}
+- **推理**: {reasoning}
 """
         if v.key_evidence:
             section += "- **關鍵證據**:\n"
-            for ev in v.key_evidence:
+            for ev in v.key_evidence[:5]:  # 最多 5 條證據
                 section += f"  - {ev}\n"
 
         if v.indicators:

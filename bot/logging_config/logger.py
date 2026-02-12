@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -76,11 +77,29 @@ def get_logger(name: str) -> logging.Logger:
 # ---------------------------------------------------------------------------
 
 class SupabaseLogHandler(logging.Handler):
-    """將日誌透過 SupabaseWriter.insert_log 寫入 bot_logs 表。"""
+    """將日誌透過 SupabaseWriter.insert_log 寫入 bot_logs 表。
+
+    寫入 Supabase 前會遮罩敏感財務數據（精確餘額、數量），
+    console 和檔案日誌不受影響。
+    """
+
+    # 遮罩 qty=0.00008932 → qty=***.***
+    _QTY_PATTERN = re.compile(r'(qty|quantity|filled|數量)[=:]\s*[\d.]+', re.IGNORECASE)
+    # 遮罩精確餘額 如 "餘額 12345.67" 或 "balance=12345.67" 或 "USDT 餘額: 12345.67"
+    _BALANCE_PATTERN = re.compile(
+        r'(餘額|balance|available|可用)\s*[=:]\s*[\d,.]+', re.IGNORECASE
+    )
 
     def __init__(self, writer: SupabaseWriter, level: int = logging.INFO) -> None:
         super().__init__(level)
         self._writer = writer
+
+    @classmethod
+    def _mask_sensitive(cls, message: str) -> str:
+        """遮罩日誌中的精確財務數據。"""
+        message = cls._QTY_PATTERN.sub(lambda m: m.group(1) + '=***', message)
+        message = cls._BALANCE_PATTERN.sub(lambda m: m.group(1) + '=***', message)
+        return message
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -88,10 +107,11 @@ class SupabaseLogHandler(logging.Handler):
             module = record.name
             if module.startswith("bot."):
                 module = module[4:]
+            message = self._mask_sensitive(self.format(record))
             self._writer.insert_log(
                 level=record.levelname,
                 module=module,
-                message=self.format(record),
+                message=message,
             )
         except Exception:
             pass  # 避免日誌寫入失敗導致遞迴錯誤

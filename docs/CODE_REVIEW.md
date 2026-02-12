@@ -12,7 +12,7 @@
 |--------|--------|------|
 | P0（立即修復） | 4 | ✅ 全部修復 |
 | P1（本週修復） | 2 | ✅ 全部修復 |
-| P2（近期改善） | 2 | 🔲 待處理 |
+| P2（近期改善） | 2 | ✅ 全部修復 |
 | P3（觀察/建議） | 多項 | 🔲 待評估 |
 
 ---
@@ -177,9 +177,9 @@
 | P1-1 | 合約覆蓋時倉位未縮半 | `app.py` | `_execute_futures_open()` 加入 `_llm_override` 檢查 |
 | P1-2 | SHORT/COVER 無持倉狀態驗證 | `app.py` | `_translate_futures_signal()` 加入 `has_short` 檢查 |
 
-### P2 待處理
+### P2 修復（已完成）
 
-| # | 問題 | 建議 |
-|---|------|------|
-| P2-1 | LLM 輸入/輸出大小無限制 | 對 prompt 輸入做截斷，對回覆做長度檢查 |
-| P2-2 | 日誌中的財務資訊 | 敏感數據降為 debug 或在 handler 中遮罩 |
+| # | 問題 | 檔案 | 修復方式 |
+|---|------|------|----------|
+| P2-1 | LLM 輸入/輸出大小無限制 | `llm/decision_engine.py`、`llm/summarizer.py` | prompt 12000 字截斷、回覆 4000 字截斷、action 白名單驗證、策略 reasoning 500 字截斷 |
+| P2-2 | 日誌中的財務資訊 | `logging_config/logger.py` | SupabaseLogHandler 遮罩 qty/balance/available 精確數字，console/file 日誌不受影響 |

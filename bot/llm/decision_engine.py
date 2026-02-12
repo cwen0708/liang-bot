@@ -27,6 +27,11 @@ class LLMDecisionEngine:
     5. 若 LLM 失敗，fallback 為加權投票
     """
 
+    # 安全限制
+    MAX_PROMPT_CHARS = 12000      # prompt 最大字元數（約 3000 tokens）
+    MAX_RESPONSE_CHARS = 4000     # LLM 回覆最大字元數
+    VALID_ACTIONS = {"BUY", "SELL", "HOLD", "SHORT", "COVER"}
+
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
         self.enabled = config.enabled
@@ -78,8 +83,24 @@ class LLMDecisionEngine:
                 mtf_summary=mtf_summary,
             )
 
+            # 2b. 安全截斷（避免超長 prompt 導致超時或費用異常）
+            if len(prompt) > self.MAX_PROMPT_CHARS:
+                logger.warning(
+                    "Prompt 過長 (%d 字元)，截斷至 %d",
+                    len(prompt), self.MAX_PROMPT_CHARS,
+                )
+                prompt = prompt[:self.MAX_PROMPT_CHARS] + "\n\n[...截斷...]\n請根據以上資訊做出決策。"
+
             # 3. 呼叫 LLM
             response = await self._client.call(prompt)
+
+            # 3b. 回覆長度檢查
+            if len(response) > self.MAX_RESPONSE_CHARS:
+                logger.warning(
+                    "LLM 回覆過長 (%d 字元)，截斷至 %d",
+                    len(response), self.MAX_RESPONSE_CHARS,
+                )
+                response = response[:self.MAX_RESPONSE_CHARS]
 
             # 4. 解析決策
             decision = self._parse_decision(response)
@@ -127,7 +148,17 @@ class LLMDecisionEngine:
 
         try:
             data = json.loads(json_str)
-            return LLMDecision(**data)
+            decision = LLMDecision(**data)
+
+            # action 白名單驗證
+            if decision.action not in LLMDecisionEngine.VALID_ACTIONS:
+                logger.warning(
+                    "LLM 回傳無效 action '%s'，改為 HOLD", decision.action,
+                )
+                decision.action = "HOLD"
+                decision.confidence = 0.0
+
+            return decision
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning("JSON 解析失敗: %s", e)
             return LLMDecision(action="HOLD", confidence=0.0, reasoning=f"JSON 解析失敗: {e}")

@@ -135,7 +135,7 @@ class OrderFlowStrategy(Strategy):
                 new_bars.append(bar)
 
         if new_bars:
-            logger.info("    [%s] aggTrade → %d 根新 K 線", self.name[:3], len(new_bars))
+            logger.debug("    [%s] aggTrade → %d 根新 K 線", self.name[:3], len(new_bars))
 
         # 送入策略
         verdict = None

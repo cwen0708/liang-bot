@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useBotStore } from '@/stores/bot'
 import { useRealtimeTable } from '@/composables/useRealtime'
 import DecisionDrawer from '@/components/DecisionDrawer.vue'
@@ -10,6 +10,49 @@ const { rows: recentOrders } = useRealtimeTable<Order>('orders', { limit: 5 })
 const { rows: recentDecisions } = useRealtimeTable<LLMDecision>('llm_decisions', { limit: 5 })
 
 const drawerDecision = ref<LLMDecision | null>(null)
+const ATH_CACHE_KEY = 'ath_prices'
+const ATH_TTL = 24 * 3600 * 1000 // 24h
+
+function loadATHCache(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(ATH_CACHE_KEY)
+    if (!raw) return {}
+    const { ts, data } = JSON.parse(raw)
+    if (Date.now() - ts > ATH_TTL) return {}
+    return data
+  } catch { return {} }
+}
+
+function saveATHCache(data: Record<string, number>) {
+  localStorage.setItem(ATH_CACHE_KEY, JSON.stringify({ ts: Date.now(), data }))
+}
+
+const athPrices = ref<Record<string, number>>(loadATHCache())
+
+function stripLD(coin: string) {
+  return coin.startsWith('LD') ? coin.slice(2) : coin
+}
+
+async function fetchATH(coin: string) {
+  const real = stripLD(coin)
+  if (athPrices.value[real]) return
+  try {
+    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${real}USDT&interval=1M&limit=1000`)
+    const data = await res.json()
+    if (Array.isArray(data)) {
+      athPrices.value[real] = Math.max(...data.map((k: any[]) => parseFloat(k[2])))
+      saveATHCache(athPrices.value)
+    }
+  } catch { /* ignore */ }
+}
+
+watch(() => bot.loans, (loans) => {
+  for (const l of loans) fetchATH(l.collateral_coin)
+}, { immediate: true })
+
+watch(() => bot.balances, (balances) => {
+  for (const b of balances) if (b.currency !== 'USDT') fetchATH(b.currency)
+}, { immediate: true })
 
 function formatTime(ts: string) {
   return new Date(ts).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false })
@@ -35,7 +78,10 @@ function loanNetValue(l: LoanHealth) {
           </template>
           <span v-else class="text-(--color-text-muted)">--</span>
         </div>
-        <div class="text-sm text-(--color-text-secondary) mt-1">
+        <div v-if="Object.keys(athPrices).length && bot.totalAssets !== null" class="text-sm text-(--color-text-secondary) mt-1 opacity-50">
+          ATH ${{ (bot.balances.reduce((s, b) => s + (b.currency === 'USDT' ? b.free : b.free * (athPrices[stripLD(b.currency)] ?? 0)), 0) + bot.loans.reduce((s, l) => s + l.collateral_amount * (athPrices[l.collateral_coin] ?? 0), 0)).toLocaleString(undefined, { maximumFractionDigits: 0 }) }} / {{ ((bot.totalAssets / (bot.balances.reduce((s, b) => s + (b.currency === 'USDT' ? b.free : b.free * (athPrices[stripLD(b.currency)] ?? 0)), 0) + bot.loans.reduce((s, l) => s + l.collateral_amount * (athPrices[l.collateral_coin] ?? 0), 0))) * 100).toFixed(1) }}%
+        </div>
+        <div v-else class="text-sm text-(--color-text-secondary) mt-1">
           {{ bot.isOnline ? '運行中' : '離線' }} · 第 {{ bot.status?.cycle_num ?? '-' }} 輪
         </div>
       </div>
@@ -69,13 +115,19 @@ function loanNetValue(l: LoanHealth) {
 
     <!-- 帳戶餘額 (現貨) -->
     <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
-      <h3 class="text-base font-semibold text-(--color-text-secondary) uppercase mb-3">帳戶餘額</h3>
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-base font-semibold text-(--color-text-secondary) uppercase">帳戶餘額</h3>
+        <div v-if="bot.balances.length" class="text-sm text-(--color-text-secondary) tabular-nums">
+          ${{ bot.totalUsdt.toLocaleString(undefined, { maximumFractionDigits: 0 }) }}
+          <span v-if="Object.keys(athPrices).length" class="opacity-50">/ ATH ${{ bot.balances.reduce((s, b) => s + (b.currency === 'USDT' ? b.free : b.free * (athPrices[stripLD(b.currency)] ?? 0)), 0).toLocaleString(undefined, { maximumFractionDigits: 0 }) }}</span>
+        </div>
+      </div>
       <div v-if="!bot.balances.length" class="text-base text-(--color-text-secondary)">尚無餘額資料</div>
       <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div v-for="b in bot.balances" :key="b.currency"
              class="bg-(--color-bg-secondary) rounded-lg p-3">
           <div class="flex justify-between items-center">
-            <span class="text-base font-bold">{{ b.currency }}</span>
+            <span class="text-base font-bold">{{ stripLD(b.currency) }}</span>
             <span class="text-sm text-(--color-text-secondary)">${{ b.usdt_value.toLocaleString(undefined, { maximumFractionDigits: 2 }) }}</span>
           </div>
           <div class="text-sm text-(--color-text-secondary) mt-1 font-mono">{{ b.free.toFixed(8) }}</div>
@@ -85,7 +137,15 @@ function loanNetValue(l: LoanHealth) {
 
     <!-- 借貸餘額 -->
     <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
-      <h3 class="text-base font-semibold text-(--color-text-secondary) uppercase mb-3">借貸餘額</h3>
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-base font-semibold text-(--color-text-secondary) uppercase">借貸餘額</h3>
+        <div v-if="bot.loans.length" class="text-sm text-(--color-text-secondary) tabular-nums">
+          估值 ${{ bot.loans.reduce((s, l) => s + l.collateral_amount * (bot.latestPrices[l.collateral_coin + '/USDT'] ?? 0), 0).toLocaleString(undefined, { maximumFractionDigits: 0 }) }}
+          / 淨值 ${{ bot.loans.reduce((s, l) => s + l.collateral_amount * (bot.latestPrices[l.collateral_coin + '/USDT'] ?? 0) - l.total_debt, 0).toLocaleString(undefined, { maximumFractionDigits: 0 }) }}
+          / 負債 ${{ bot.loans.reduce((s, l) => s + l.total_debt, 0).toLocaleString(undefined, { maximumFractionDigits: 0 }) }}
+          <span v-if="Object.keys(athPrices).length" class="opacity-50">/ ATH ${{ bot.loans.reduce((s, l) => s + l.collateral_amount * (athPrices[l.collateral_coin] ?? 0), 0).toLocaleString(undefined, { maximumFractionDigits: 0 }) }}</span>
+        </div>
+      </div>
       <div v-if="!bot.loans.length" class="text-base text-(--color-text-secondary)">尚無借貸資料</div>
       <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div v-for="l in bot.loans" :key="`${l.collateral_coin}/${l.loan_coin}`"
@@ -97,19 +157,17 @@ function loanNetValue(l: LoanHealth) {
               'text-(--color-warning)': l.ltv >= 0.70 && l.ltv < 0.75,
               'text-(--color-success)': l.ltv < 0.4,
               'text-(--color-text-secondary)': l.ltv >= 0.4 && l.ltv < 0.70,
-            }">LTV {{ (l.ltv * 100).toFixed(1) }}%</span>
+            }">{{ (l.ltv * 100).toFixed(1) }}%</span>
           </div>
-          <div class="text-sm text-(--color-text-secondary) mt-1">
-            質押 {{ l.collateral_amount.toFixed(4) }} · 負債 {{ l.total_debt.toFixed(2) }}
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-x-3 gap-y-1 mt-2 text-sm text-(--color-text-secondary)">
+            <div class="flex justify-between"><span>質押</span><span class="font-mono">{{ l.collateral_amount.toFixed(4) }}</span></div>
+            <div class="flex justify-between"><span>負債</span><span class="font-mono">{{ l.total_debt.toFixed(2) }}</span></div>
+            <div class="flex justify-between"><span>淨值</span><span class="font-mono">${{ loanNetValue(l).toFixed(2) }}</span></div>
+            <div class="flex justify-between opacity-50"><span>估值</span><span class="font-mono">${{ (l.collateral_amount * (bot.latestPrices[l.collateral_coin + '/USDT'] ?? 0)).toLocaleString(undefined, { maximumFractionDigits: 0 }) }}</span></div>
           </div>
-          <div class="flex justify-between items-center mt-1">
-            <span class="text-sm text-(--color-text-secondary)">
-              淨值 ${{ loanNetValue(l).toFixed(2) }}
-            </span>
-            <span v-if="l.action_taken !== 'none'" class="text-sm font-medium"
-                  :class="l.action_taken === 'protect' ? 'text-(--color-warning)' : 'text-(--color-success)'">
-              {{ l.action_taken === 'protect' ? '保護' : '獲利了結' }}
-            </span>
+          <div v-if="l.action_taken !== 'none'" class="text-sm font-medium mt-1 text-right"
+               :class="l.action_taken === 'protect' ? 'text-(--color-warning)' : 'text-(--color-success)'">
+            {{ l.action_taken === 'protect' ? '保護' : '獲利了結' }}
           </div>
         </div>
       </div>

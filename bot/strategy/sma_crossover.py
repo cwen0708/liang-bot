@@ -4,7 +4,7 @@ import pandas as pd
 
 from bot.logging_config import get_logger
 from bot.strategy.base import BaseStrategy
-from bot.strategy.signals import Signal
+from bot.strategy.signals import Signal, StrategyVerdict
 
 logger = get_logger("strategy.sma_crossover")
 
@@ -66,3 +66,31 @@ class SMACrossoverStrategy(BaseStrategy):
             return Signal.SELL
 
         return Signal.HOLD
+
+    def generate_verdict(self, df: pd.DataFrame) -> StrategyVerdict:
+        df_calc = self.calculate_indicators(df)
+        signal = self.generate_signal(df)
+
+        latest = df_calc.iloc[-1]
+        fast_period = self.params.get("fast_period", 10)
+        slow_period = self.params.get("slow_period", 30)
+        sma_fast = latest["sma_fast"] if not pd.isna(latest["sma_fast"]) else 0
+        sma_slow = latest["sma_slow"] if not pd.isna(latest["sma_slow"]) else 0
+
+        # 信心度：兩線距離越大，信心越高
+        spread = abs(sma_fast - sma_slow) / sma_slow if sma_slow > 0 else 0
+        if signal != Signal.HOLD:
+            confidence = min(1.0, max(0.3, spread * 50))
+        else:
+            confidence = 0.0
+
+        cross = "金叉" if sma_fast > sma_slow else "死叉" if sma_fast < sma_slow else "持平"
+
+        return StrategyVerdict(
+            strategy_name=self.name,
+            signal=signal,
+            confidence=confidence,
+            reasoning=f"SMA({fast_period})={sma_fast:.2f} {'>' if sma_fast > sma_slow else '<'} SMA({slow_period})={sma_slow:.2f} | {cross} 差距{spread:.2%}",
+            timeframe=self.timeframe,
+            indicators={"sma_fast": round(sma_fast, 2), "sma_slow": round(sma_slow, 2), "spread": round(spread, 4)},
+        )

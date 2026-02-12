@@ -364,6 +364,7 @@ class FuturesTradingBot:
                 self._db.insert_verdict(
                     symbol, verdict.strategy_name, verdict.signal.value,
                     verdict.confidence, verdict.reasoning, cycle_id,
+                    market_type="futures",
                     timeframe=verdict.timeframe,
                 )
                 abbr = strategy.name[:3]

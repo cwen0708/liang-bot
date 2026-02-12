@@ -46,33 +46,63 @@ orderflow:
   absorption_lookback: 10
   signal_threshold: 0.5
 
-# Multi-Strategy（每策略獨立 timeframe，統一每 15 分鐘觸發）
+# Multi-Strategy（每策略 × 4 時段，統一每 15 分鐘觸發）
 strategies:
+  # ── SMA Crossover ──
+  - name: "sma_crossover"
+    timeframe: "15m"
+    params: { fast_period: 10, slow_period: 30 }
   - name: "sma_crossover"
     timeframe: "1h"
-    params:
-      fast_period: 10
-      slow_period: 30
+    params: { fast_period: 10, slow_period: 30 }
+  - name: "sma_crossover"
+    timeframe: "4h"
+    params: { fast_period: 10, slow_period: 30 }
+  - name: "sma_crossover"
+    timeframe: "1d"
+    params: { fast_period: 10, slow_period: 30 }
+  # ── RSI Oversold ──
   - name: "rsi_oversold"
     timeframe: "15m"
-    params:
-      period: 14
-      oversold: 30
-      overbought: 70
+    params: { period: 14, oversold: 30, overbought: 70 }
+  - name: "rsi_oversold"
+    timeframe: "1h"
+    params: { period: 14, oversold: 30, overbought: 70 }
+  - name: "rsi_oversold"
+    timeframe: "4h"
+    params: { period: 14, oversold: 30, overbought: 70 }
+  - name: "rsi_oversold"
+    timeframe: "1d"
+    params: { period: 14, oversold: 30, overbought: 70 }
+  # ── Bollinger Breakout ──
+  - name: "bollinger_breakout"
+    timeframe: "15m"
+    params: { period: 20, std_dev: 2.0 }
+  - name: "bollinger_breakout"
+    timeframe: "1h"
+    params: { period: 20, std_dev: 2.0 }
   - name: "bollinger_breakout"
     timeframe: "4h"
-    params:
-      period: 20
-      std_dev: 2.0
+    params: { period: 20, std_dev: 2.0 }
+  - name: "bollinger_breakout"
+    timeframe: "1d"
+    params: { period: 20, std_dev: 2.0 }
+  # ── MACD Momentum ──
+  - name: "macd_momentum"
+    timeframe: "15m"
+    params: { fast_period: 12, slow_period: 26, signal_period: 9 }
+  - name: "macd_momentum"
+    timeframe: "1h"
+    params: { fast_period: 12, slow_period: 26, signal_period: 9 }
+  - name: "macd_momentum"
+    timeframe: "4h"
+    params: { fast_period: 12, slow_period: 26, signal_period: 9 }
   - name: "macd_momentum"
     timeframe: "1d"
-    params:
-      fast_period: 12
-      slow_period: 26
-      signal_period: 9
+    params: { fast_period: 12, slow_period: 26, signal_period: 9 }
+  # ── Order Flow（無 K 線時段）──
   - name: "tia_orderflow"
-    params:
-      signal_threshold: 0.5
+    params: { signal_threshold: 0.5 }
 
 # LLM Decision Engine
 llm:

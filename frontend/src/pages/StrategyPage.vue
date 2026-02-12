@@ -1,14 +1,32 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRealtimeTable } from '@/composables/useRealtime'
+import { useSupabase } from '@/composables/useSupabase'
 import { useBotStore } from '@/stores/bot'
 import DecisionDrawer from '@/components/DecisionDrawer.vue'
 import type { StrategyVerdict, LLMDecision } from '@/types'
 
 const bot = useBotStore()
+const supabase = useSupabase()
 
-const { rows: verdicts, loading: vLoading } = useRealtimeTable<StrategyVerdict>('strategy_verdicts', { limit: 500 })
 const { rows: decisions, loading: dLoading } = useRealtimeTable<LLMDecision>('llm_decisions', { limit: 200 })
+const { rows: verdicts, loading: vLoading } = useRealtimeTable<StrategyVerdict>('strategy_verdicts', { limit: 5000 })
+
+// 卡片 verdict 找不到時，fallback 按 cycle_id 單獨撈（像 Drawer 一樣）
+const verdictCache = new Map<string, StrategyVerdict[]>()
+
+async function fetchVerdictsByCycle(cycleId: string, symbol: string): Promise<StrategyVerdict[]> {
+  const key = `${cycleId}:${symbol}`
+  if (verdictCache.has(key)) return verdictCache.get(key)!
+  const { data } = await supabase
+    .from('strategy_verdicts')
+    .select('*')
+    .eq('cycle_id', cycleId)
+    .eq('symbol', symbol)
+  const result = (data as StrategyVerdict[]) ?? []
+  verdictCache.set(key, result)
+  return result
+}
 
 const marketTab = ref<'spot' | 'futures'>('spot')
 
@@ -20,9 +38,6 @@ const filteredDecisions = computed(() => {
   return decisions.value.filter(d => (d.market_type ?? 'spot') === marketTab.value && daysAgo(d.created_at) <= 3)
 })
 
-const filteredVerdicts = computed(() => {
-  return verdicts.value.filter(v => (v.market_type ?? 'spot') === marketTab.value)
-})
 
 const symbols = computed(() => {
   const set = new Set<string>()
@@ -49,17 +64,38 @@ const allStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'm
 
 type VerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
 
-/** Returns all 5 strategies with their verdict for a given decision, matched by cycle_id */
+/** Per strategy, pick the verdict with the highest confidence; always show all strategies.
+ *  先從已載入的 verdicts 中找，找不到就觸發 fallback 查詢。 */
 function getVerdictSlots(decision: LLMDecision): VerdictSlot[] {
-  const matched = filteredVerdicts.value.filter(v => v.cycle_id === decision.cycle_id && v.symbol === decision.symbol)
-  return allStrategies.map(s => ({
-    strategy: s,
-    verdict: matched.find(v => v.strategy === s) ?? null,
-  }))
+  let matched = verdicts.value.filter(v => v.cycle_id === decision.cycle_id && v.symbol === decision.symbol)
+
+  // Fallback: 從 cache 或觸發查詢
+  if (!matched.length) {
+    const key = `${decision.cycle_id}:${decision.symbol}`
+    if (verdictCache.has(key)) {
+      matched = verdictCache.get(key)!
+    } else {
+      // 觸發非同步查詢，下次 render 會從 cache 拿到
+      fetchVerdictsByCycle(decision.cycle_id, decision.symbol).then(data => {
+        if (data.length) verdicts.value = [...verdicts.value, ...data]
+      })
+    }
+  }
+
+  const best = new Map<string, StrategyVerdict>()
+  for (const v of matched) {
+    const prev = best.get(v.strategy)
+    if (!prev || v.confidence > prev.confidence) best.set(v.strategy, v)
+  }
+  return allStrategies.map(s => ({ strategy: s, verdict: best.get(s) ?? null }))
 }
 
-function formatTime(ts: string) {
-  return new Date(ts).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+function timeAgo(ts: string): string {
+  const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000)
+  if (diff < 60) return `${diff}秒前`
+  if (diff < 3600) return `${Math.floor(diff / 60)}分前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}小時前`
+  return `${Math.floor(diff / 86400)}天前`
 }
 
 function signalBadgeClass(signal: string) {
@@ -188,7 +224,7 @@ const drawerDecision = ref<LLMDecision | null>(null)
               <div
                 v-for="d in group.cards"
                 :key="d.id"
-                class="kanban-card bg-(--color-bg-card) border border-(--color-border) rounded-lg p-2.5 min-h-[240px] cursor-pointer hover:border-(--color-accent)/50 transition-colors"
+                class="kanban-card bg-(--color-bg-card) border border-(--color-border) rounded-lg p-2.5 min-h-[218px] cursor-pointer hover:border-(--color-accent)/50 transition-colors"
                 :style="cardStyle(d)"
                 @click="drawerDecision = d"
               >
@@ -198,26 +234,27 @@ const drawerDecision = ref<LLMDecision | null>(null)
                     <div class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: isRecent(d.created_at) ? 'var(--color-warning)' : actionDotColor(d.action) }"></div>
                     <span class="text-xs font-bold" :class="isRecent(d.created_at) ? 'text-(--color-warning)' : actionBadgeClass(d.action)">{{ signalLabel(d.action) }}</span>
                   </div>
-                  <span class="text-[11px] text-(--color-text-muted) tabular-nums">{{ formatTime(d.created_at) }}</span>
+                  <span class="text-[11px] text-(--color-text-muted)">{{ timeAgo(d.created_at) }}</span>
                 </div>
 
                 <!-- Reasoning preview -->
                 <div class="text-xs text-(--color-text-secondary) leading-relaxed line-clamp-3 mb-2">{{ d.reasoning }}</div>
 
-                <!-- Strategy verdict chips (always show all 5) -->
+                <!-- Strategy verdict chips -->
                 <div class="flex flex-col gap-1">
                   <div
                     v-for="slot in getVerdictSlots(d)"
                     :key="slot.strategy"
-                    class="flex items-center justify-between gap-1 rounded px-1.5 py-0.5"
+                    class="flex items-center justify-between gap-1 rounded px-1.5 py-px"
+                    :class="{ 'opacity-35': !slot.verdict || slot.verdict.signal === 'HOLD' }"
                     :style="slot.verdict ? verdictBgStyle(slot.verdict.signal, slot.verdict.confidence) : { background: 'var(--color-bg-secondary)' }"
                   >
                     <div class="flex items-center gap-1 min-w-0">
-                      <span class="text-[11px] text-(--color-text-muted) truncate">{{ slot.strategy }}</span>
-                      <span v-if="slot.verdict?.timeframe" class="text-[10px] text-(--color-text-muted) opacity-60 shrink-0">{{ slot.verdict.timeframe }}</span>
+                      <span class="text-[8px] text-(--color-text-muted) truncate">{{ slot.strategy }}</span>
+                      <span v-if="slot.verdict?.timeframe" class="text-[8px] text-(--color-text-muted) shrink-0">{{ slot.verdict.timeframe }}</span>
                     </div>
-                    <span v-if="slot.verdict" class="text-[11px] font-bold shrink-0" :class="signalBadgeClass(slot.verdict.signal)">{{ signalLabel(slot.verdict.signal) }}</span>
-                    <span v-else class="text-[11px] text-(--color-text-muted) opacity-30 shrink-0">-</span>
+                    <span v-if="slot.verdict" class="text-[8px] font-bold shrink-0" :class="signalBadgeClass(slot.verdict.signal)">{{ (slot.verdict.confidence * 100).toFixed(0) }}%</span>
+                    <span v-else class="text-[8px] text-(--color-text-muted) shrink-0">-</span>
                   </div>
                 </div>
               </div>
@@ -225,7 +262,7 @@ const drawerDecision = ref<LLMDecision | null>(null)
               <!-- Ghost placeholder when this action has no card -->
               <div
                 v-if="!group.cards.length"
-                class="border border-dashed rounded-lg p-2.5 min-h-[240px] flex items-center"
+                class="border border-dashed rounded-lg p-2.5 min-h-[218px] flex items-center"
                 :style="{ borderColor: `color-mix(in srgb, ${actionDotColor(group.action)} 30%, transparent)` }"
               >
                 <div class="flex items-center gap-1.5">
@@ -240,7 +277,7 @@ const drawerDecision = ref<LLMDecision | null>(null)
       </div>
     </div>
 
-    <DecisionDrawer :decision="drawerDecision" :verdicts="filteredVerdicts" @close="drawerDecision = null" />
+    <DecisionDrawer :decision="drawerDecision" @close="drawerDecision = null" />
   </div>
 </template>
 

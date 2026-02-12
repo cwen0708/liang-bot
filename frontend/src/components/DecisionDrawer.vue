@@ -1,14 +1,47 @@
 <script setup lang="ts">
+import { ref, watch } from 'vue'
+import { useSupabase } from '@/composables/useSupabase'
 import type { LLMDecision, StrategyVerdict } from '@/types'
 
 const props = defineProps<{
   decision: LLMDecision | null
-  verdicts?: StrategyVerdict[]
 }>()
 
 const emit = defineEmits<{
   close: []
 }>()
+
+const supabase = useSupabase()
+const verdicts = ref<StrategyVerdict[]>([])
+const loading = ref(false)
+
+const allStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'macd_momentum', 'tia_orderflow']
+
+type VerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
+
+/** When decision changes, fetch verdicts by cycle_id */
+watch(() => props.decision, async (d) => {
+  verdicts.value = []
+  if (!d?.cycle_id) return
+  loading.value = true
+  const { data } = await supabase
+    .from('strategy_verdicts')
+    .select('*')
+    .eq('cycle_id', d.cycle_id)
+    .eq('symbol', d.symbol)
+  if (data) verdicts.value = data as StrategyVerdict[]
+  loading.value = false
+})
+
+/** Per strategy, pick the verdict with the highest confidence */
+function getVerdictSlots(): VerdictSlot[] {
+  const best = new Map<string, StrategyVerdict>()
+  for (const v of verdicts.value) {
+    const prev = best.get(v.strategy)
+    if (!prev || v.confidence > prev.confidence) best.set(v.strategy, v)
+  }
+  return allStrategies.map(s => ({ strategy: s, verdict: best.get(s) ?? null }))
+}
 
 function formatDateTime(ts: string) {
   return new Date(ts).toLocaleString('zh-TW', { hour12: false })
@@ -41,19 +74,6 @@ function verdictBgStyle(signal: string, confidence: number): Record<string, stri
   return {
     background: `linear-gradient(to right, color-mix(in srgb, ${color} 25%, transparent) 0%, color-mix(in srgb, ${color} 12%, transparent) ${pct}%, transparent ${pct}%) ${bg}`,
   }
-}
-
-const allStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'macd_momentum', 'tia_orderflow']
-
-type VerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
-
-function getVerdictSlots(): VerdictSlot[] {
-  if (!props.decision || !props.verdicts) return []
-  const matched = props.verdicts.filter(v => v.cycle_id === props.decision!.cycle_id && v.symbol === props.decision!.symbol)
-  return allStrategies.map(s => ({
-    strategy: s,
-    verdict: matched.find(v => v.strategy === s) ?? null,
-  }))
 }
 </script>
 
@@ -89,30 +109,29 @@ function getVerdictSlots(): VerdictSlot[] {
             </div>
 
             <!-- Full reasoning -->
-            <div class="text-sm text-(--color-text-primary) leading-relaxed whitespace-pre-wrap">{{ decision.reasoning }}</div>
+            <div class="text-sm text-(--color-text-primary) leading-relaxed whitespace-pre-wrap">{{ decision.reasoning.replace(/。/g, '。\n\n') }}</div>
 
             <!-- Strategy verdicts -->
-            <div v-if="verdicts && verdicts.length">
-              <div class="flex flex-col gap-2">
-                <div
-                  v-for="slot in getVerdictSlots()"
-                  :key="slot.strategy"
-                  class="rounded-lg p-3"
-                  :style="slot.verdict ? verdictBgStyle(slot.verdict.signal, slot.verdict.confidence) : { background: 'var(--color-bg-secondary)' }"
-                >
-                  <div class="flex items-center justify-between mb-1">
-                    <div class="flex items-center gap-1.5">
-                      <span class="text-sm font-medium text-(--color-text-primary)">{{ slot.strategy }}</span>
-                      <span v-if="slot.verdict?.timeframe" class="text-xs text-(--color-text-muted) opacity-60">{{ slot.verdict.timeframe }}</span>
-                    </div>
-                    <div v-if="slot.verdict" class="flex items-center gap-2">
-                      <span class="text-sm font-bold" :class="signalBadgeClass(slot.verdict.signal)">{{ signalLabel(slot.verdict.signal) }}</span>
-                      <span class="text-sm text-(--color-text-muted)">{{ (slot.verdict.confidence * 100).toFixed(0) }}%</span>
-                    </div>
-                    <span v-else class="text-sm text-(--color-text-muted) opacity-30">-</span>
+            <div v-if="loading" class="text-sm text-(--color-text-muted)">載入策略...</div>
+            <div v-else class="flex flex-col gap-2">
+              <div
+                v-for="slot in getVerdictSlots()"
+                :key="slot.strategy"
+                class="rounded-lg p-3"
+                :style="slot.verdict ? verdictBgStyle(slot.verdict.signal, slot.verdict.confidence) : { background: 'var(--color-bg-secondary)' }"
+              >
+                <div class="flex items-center justify-between mb-1">
+                  <div class="flex items-center gap-1.5">
+                    <span class="text-sm font-medium text-(--color-text-primary)">{{ slot.strategy }}</span>
+                    <span v-if="slot.verdict?.timeframe" class="text-xs text-(--color-text-muted) opacity-60">{{ slot.verdict.timeframe }}</span>
                   </div>
-                  <div v-if="slot.verdict?.reasoning" class="text-xs text-(--color-text-secondary) leading-relaxed">{{ slot.verdict.reasoning }}</div>
+                  <div v-if="slot.verdict" class="flex items-center gap-2">
+                    <span class="text-sm font-bold" :class="signalBadgeClass(slot.verdict.signal)">{{ signalLabel(slot.verdict.signal) }}</span>
+                    <span class="text-sm text-(--color-text-muted)">{{ (slot.verdict.confidence * 100).toFixed(0) }}%</span>
+                  </div>
+                  <span v-else class="text-sm text-(--color-text-muted) opacity-30">-</span>
                 </div>
+                <div v-if="slot.verdict?.reasoning" class="text-xs text-(--color-text-secondary) leading-relaxed">{{ slot.verdict.reasoning }}</div>
               </div>
             </div>
           </div>

@@ -491,7 +491,7 @@ class TradingBot:
         fc = self.settings.futures
         sc = self.settings.spot
 
-        logger.info("═══ 啟動交易 ═══")
+        logger.info("=============================================")
         logger.info("  [現貨] 交易對=%s  時間框架=%s  模式=%s", sc.pairs, sc.timeframe, sc.mode.value)
         logger.info("  [策略] %s", ", ".join(all_names))
         logger.info("  [LLM]  %s", "啟用" if self.llm_engine.enabled else "停用")
@@ -517,8 +517,7 @@ class TradingBot:
             cycle_id = f"c{cycle}-{uuid.uuid4().hex[:8]}"
             slot, slot_start = _current_slot(self.settings.spot.timeframe)
             logger.info(
-                "═══ 第 %d 輪分析開始 (%s) | %s 第 %d 區間 (自 %s) ═══",
-                cycle, cycle_id, self.settings.spot.timeframe, slot, slot_start,
+                "=============================================",
             )
 
             # 從 Supabase 載入最新配置（若版本已變更）
@@ -598,8 +597,7 @@ class TradingBot:
 
             if self._running:
                 logger.info(
-                    "═══ 第 %d 輪完成，%d 秒後進行下一輪 ═══",
-                    cycle, self.settings.spot.check_interval_seconds,
+                    "=============================================",
                 )
                 time.sleep(self.settings.spot.check_interval_seconds)
 

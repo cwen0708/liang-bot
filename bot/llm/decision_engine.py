@@ -1,8 +1,5 @@
 """LLM 決策引擎 — 彙整各策略結論後呼叫 LLM 做最終判斷。"""
 
-import json
-import re
-
 from bot.config.settings import LLMConfig
 from bot.llm.client import ClaudeCLIClient
 from bot.llm.prompts import build_decision_prompt
@@ -11,6 +8,7 @@ from bot.llm.summarizer import summarize_portfolio, summarize_risk_metrics, summ
 from bot.logging_config import get_logger
 from bot.risk.metrics import RiskMetrics
 from bot.strategy.signals import Signal, StrategyVerdict
+from bot.utils.helpers import parse_json_response
 
 logger = get_logger("llm.decision_engine")
 
@@ -114,21 +112,12 @@ class LLMDecisionEngine:
     @staticmethod
     def _parse_decision(response: str) -> LLMDecision:
         """從 LLM 回傳文字中解析 JSON 決策。"""
-        # 嘗試找到 JSON 區塊
-        json_match = re.search(r'```json\s*\n?(.*?)\n?\s*```', response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1).strip()
-        else:
-            # 嘗試找到裸 JSON
-            json_match = re.search(r'\{[^{}]*"action"[^{}]*\}', response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-            else:
-                logger.warning("無法從 LLM 回傳中解析 JSON，使用 HOLD")
-                return LLMDecision(action="HOLD", confidence=0.0, reasoning="無法解析 LLM 回傳")
+        data = parse_json_response(response)
+        if data is None:
+            logger.warning("無法從 LLM 回傳中解析 JSON，使用 HOLD")
+            return LLMDecision(action="HOLD", confidence=0.0, reasoning="無法解析 LLM 回傳")
 
         try:
-            data = json.loads(json_str)
             decision = LLMDecision(**data)
 
             # action 白名單驗證
@@ -140,7 +129,7 @@ class LLMDecisionEngine:
                 decision.confidence = 0.0
 
             return decision
-        except (json.JSONDecodeError, TypeError) as e:
+        except (TypeError, ValueError) as e:
             logger.warning("JSON 解析失敗: %s", e)
             return LLMDecision(action="HOLD", confidence=0.0, reasoning=f"JSON 解析失敗: {e}")
 

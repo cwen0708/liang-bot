@@ -15,17 +15,12 @@ onMounted(() => {
   if (!bot.spotPairs.length) bot.fetchConfigPairs()
 })
 
-// 依設定檔交易對篩選，而非 market_type 欄位
 const filteredDecisions = computed(() => {
-  const pairs = marketTab.value === 'spot' ? bot.spotPairs : bot.futuresPairs
-  if (!pairs.length) return decisions.value.filter(d => (d.market_type ?? 'spot') === marketTab.value)
-  return decisions.value.filter(d => pairs.includes(d.symbol))
+  return decisions.value.filter(d => (d.market_type ?? 'spot') === marketTab.value)
 })
 
 const filteredVerdicts = computed(() => {
-  const pairs = marketTab.value === 'spot' ? bot.spotPairs : bot.futuresPairs
-  if (!pairs.length) return verdicts.value.filter(v => (v.market_type ?? 'spot') === marketTab.value)
-  return verdicts.value.filter(v => pairs.includes(v.symbol))
+  return verdicts.value.filter(v => (v.market_type ?? 'spot') === marketTab.value)
 })
 
 const symbols = computed(() => {

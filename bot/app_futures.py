@@ -203,7 +203,7 @@ class FuturesTradingBot:
         while self._running:
             cycle += 1
             cycle_id = f"fc{cycle}-{uuid.uuid4().hex[:8]}"
-            logger.info("═══ 合約第 %d 輪分析開始 (%s) ═══", cycle, cycle_id)
+            logger.info("=============================================")
 
             # 載入最新配置
             new_cfg = self._db.load_config()
@@ -248,8 +248,7 @@ class FuturesTradingBot:
 
             if self._running:
                 logger.info(
-                    "═══ 合約第 %d 輪完成，%d 秒後進行下一輪 ═══",
-                    cycle, self.settings.futures.check_interval_seconds,
+                    "=============================================",
                 )
                 time.sleep(self.settings.futures.check_interval_seconds)
 
@@ -503,6 +502,7 @@ class FuturesTradingBot:
                 symbol, decision.action.value if isinstance(decision.action, Signal) else str(decision.action),
                 decision.confidence, decision.reasoning,
                 self.settings.llm.model, cycle_id,
+                market_type="futures",
             )
 
             # 將 action 字串轉為 Signal

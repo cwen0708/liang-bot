@@ -118,7 +118,7 @@ function createMiniChart(pair: string) {
 
   const chart = createChart(container, {
     width: container.clientWidth,
-    height: 90,
+    height: 130,
     layout: {
       background: { type: ColorType.Solid, color: 'transparent' },
       textColor: c.text,
@@ -283,27 +283,11 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- LTV 進度條 -->
-        <div class="mt-3 h-1.5 bg-(--color-bg-secondary) rounded-full overflow-hidden">
-          <div
-            v-if="latestPerPair.get(pair)"
-            class="h-full rounded-full transition-all duration-500"
-            :class="ltvBgColor(latestPerPair.get(pair)!.ltv)"
-            :style="{ width: `${Math.min(latestPerPair.get(pair)!.ltv * 100, 100)}%` }"
-          />
-        </div>
-        <div class="flex justify-between text-sm text-(--color-text-secondary) mt-0.5">
-          <span>0%</span>
-          <span class="text-(--color-success)">40%</span>
-          <span>65%</span>
-          <span class="text-(--color-danger)">75%</span>
-        </div>
-
         <!-- 迷你 LTV 曲線圖 (lightweight-charts) -->
         <div
           :ref="(el) => setChartRef(el, pair)"
-          class="mt-2 w-full"
-          style="height: 90px"
+          class="mt-3 w-full"
+          style="height: 130px"
         />
       </div>
     </div>

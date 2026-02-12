@@ -1,11 +1,15 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import { useBotStore } from '@/stores/bot'
 import { useRealtimeTable } from '@/composables/useRealtime'
+import DecisionDrawer from '@/components/DecisionDrawer.vue'
 import type { Order, LoanHealth, LLMDecision } from '@/types'
 
 const bot = useBotStore()
 const { rows: recentOrders } = useRealtimeTable<Order>('orders', { limit: 5 })
 const { rows: recentDecisions } = useRealtimeTable<LLMDecision>('llm_decisions', { limit: 5 })
+
+const drawerDecision = ref<LLMDecision | null>(null)
 
 function formatTime(ts: string) {
   return new Date(ts).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false })
@@ -133,15 +137,20 @@ function loanNetValue(l: LoanHealth) {
       <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
         <h3 class="text-base font-semibold text-(--color-text-secondary) uppercase mb-3">AI 決策</h3>
         <div v-if="!recentDecisions.length" class="text-base text-(--color-text-secondary)">尚無決策</div>
-        <div v-for="d in recentDecisions" :key="d.id" class="py-2 border-b border-(--color-border) last:border-0 text-base">
-          <div class="flex justify-between">
-            <span :class="{
-              'text-(--color-success)': d.action === 'BUY',
-              'text-(--color-danger)': d.action === 'SELL',
-              'text-(--color-text-secondary)': d.action === 'HOLD',
-            }" class="font-medium">
-              {{ d.action === 'BUY' ? '買入' : d.action === 'SELL' ? '賣出' : '觀望' }}
-            </span>
+        <div v-for="d in recentDecisions" :key="d.id"
+             class="py-2 border-b border-(--color-border) last:border-0 text-base cursor-pointer hover:bg-(--color-bg-secondary)/50 transition-colors rounded px-1 -mx-1"
+             @click="drawerDecision = d">
+          <div class="flex justify-between items-center">
+            <div class="flex items-center gap-1.5">
+              <span :class="{
+                'text-(--color-success)': d.action === 'BUY',
+                'text-(--color-danger)': d.action === 'SELL',
+                'text-(--color-text-secondary)': d.action === 'HOLD',
+              }" class="font-medium">
+                {{ d.action === 'BUY' ? '買入' : d.action === 'SELL' ? '賣出' : '觀望' }}
+              </span>
+              <span class="px-1 py-0.5 rounded text-[10px] font-medium bg-(--color-bg-secondary) text-(--color-text-muted)">{{ (d.market_type ?? 'spot') === 'futures' ? '合約' : '現貨' }}</span>
+            </div>
             <span class="text-(--color-text-secondary) text-sm">{{ d.symbol }} &middot; {{ (d.confidence * 100).toFixed(0) }}%</span>
           </div>
           <div class="text-sm text-(--color-text-secondary) mt-1 line-clamp-2">{{ d.reasoning }}</div>
@@ -149,5 +158,6 @@ function loanNetValue(l: LoanHealth) {
       </div>
     </div>
 
+    <DecisionDrawer :decision="drawerDecision" @close="drawerDecision = null" />
   </div>
 </template>

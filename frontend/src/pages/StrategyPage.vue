@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRealtimeTable } from '@/composables/useRealtime'
 import { useBotStore } from '@/stores/bot'
+import DecisionDrawer from '@/components/DecisionDrawer.vue'
 import type { StrategyVerdict, LLMDecision } from '@/types'
 
 const bot = useBotStore()
@@ -16,7 +17,7 @@ onMounted(() => {
 })
 
 const filteredDecisions = computed(() => {
-  return decisions.value.filter(d => (d.market_type ?? 'spot') === marketTab.value)
+  return decisions.value.filter(d => (d.market_type ?? 'spot') === marketTab.value && daysAgo(d.created_at) <= 3)
 })
 
 const filteredVerdicts = computed(() => {
@@ -59,10 +60,6 @@ function getVerdictSlots(decision: LLMDecision): VerdictSlot[] {
 
 function formatTime(ts: string) {
   return new Date(ts).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
-}
-
-function formatDateTime(ts: string) {
-  return new Date(ts).toLocaleString('zh-TW', { hour12: false })
 }
 
 function signalBadgeClass(signal: string) {
@@ -110,24 +107,28 @@ function actionCounts(symbol: string): { buy: number; sell: number; hold: number
   }
 }
 
-/** Previous decisions for the same symbol+action, excluding the current one */
-function getPreviousDecisions(current: LLMDecision): LLMDecision[] {
-  return filteredDecisions.value
-    .filter(d => d.symbol === current.symbol && d.action === current.action && d.id !== current.id)
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(0, 5)
+function daysAgo(ts: string): number {
+  const now = new Date()
+  const d = new Date(ts)
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const dStart = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  return Math.round((todayStart.getTime() - dStart.getTime()) / 86400000)
 }
 
-// --- Drawer ---
+function cardStyle(d: LLMDecision): Record<string, string> {
+  const days = daysAgo(d.created_at)
+  const opacityMap: Record<number, string> = { 0: '1', 1: '0.8', 2: '0.6', 3: '0.4' }
+  const style: Record<string, string> = {}
+  if (days === 0) style.borderColor = 'color-mix(in srgb, var(--color-warning) 60%, transparent)'
+  if (days > 0) style.opacity = opacityMap[days] ?? '0.4'
+  return style
+}
+
+function isRecent(ts: string): boolean {
+  return Date.now() - new Date(ts).getTime() < 4 * 3600000
+}
+
 const drawerDecision = ref<LLMDecision | null>(null)
-
-function openDrawer(d: LLMDecision) {
-  drawerDecision.value = d
-}
-
-function closeDrawer() {
-  drawerDecision.value = null
-}
 </script>
 
 <template>
@@ -188,13 +189,14 @@ function closeDrawer() {
                 v-for="d in group.cards"
                 :key="d.id"
                 class="kanban-card bg-(--color-bg-card) border border-(--color-border) rounded-lg p-2.5 min-h-[240px] cursor-pointer hover:border-(--color-accent)/50 transition-colors"
-                @click="openDrawer(d)"
+                :style="cardStyle(d)"
+                @click="drawerDecision = d"
               >
                 <!-- Top: action dot + badge + time -->
                 <div class="flex items-center justify-between mb-1.5">
                   <div class="flex items-center gap-1.5">
-                    <div class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: actionDotColor(d.action) }"></div>
-                    <span class="text-xs font-bold" :class="actionBadgeClass(d.action)">{{ signalLabel(d.action) }}</span>
+                    <div class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: isRecent(d.created_at) ? 'var(--color-warning)' : actionDotColor(d.action) }"></div>
+                    <span class="text-xs font-bold" :class="isRecent(d.created_at) ? 'text-(--color-warning)' : actionBadgeClass(d.action)">{{ signalLabel(d.action) }}</span>
                   </div>
                   <span class="text-[11px] text-(--color-text-muted) tabular-nums">{{ formatTime(d.created_at) }}</span>
                 </div>
@@ -238,94 +240,7 @@ function closeDrawer() {
       </div>
     </div>
 
-    <!-- Drawer overlay -->
-    <Teleport to="body">
-      <Transition name="drawer">
-        <div v-if="drawerDecision" class="fixed inset-0 z-50 flex justify-end" @click.self="closeDrawer">
-          <!-- Backdrop -->
-          <div class="absolute inset-0 bg-black/40" @click="closeDrawer"></div>
-
-          <!-- Drawer panel -->
-          <div class="relative w-full max-w-lg bg-(--color-bg-primary) shadow-xl overflow-y-auto">
-            <div class="p-5 flex flex-col gap-4">
-              <!-- Header -->
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2.5">
-                  <div class="flex items-center gap-1.5 px-3 py-1 rounded-md text-sm font-bold" :class="actionBadgeClass(drawerDecision.action)">
-                    <div class="w-2 h-2 rounded-full bg-current"></div>
-                    {{ signalLabel(drawerDecision.action) }}
-                  </div>
-                  <span class="font-semibold text-lg text-(--color-text-primary)">{{ drawerDecision.symbol }}</span>
-                </div>
-                <button
-                  class="p-1.5 rounded-lg hover:bg-(--color-bg-secondary) text-(--color-text-secondary) transition-colors"
-                  @click="closeDrawer"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                </button>
-              </div>
-
-              <!-- Time -->
-              <div class="text-sm text-(--color-text-muted)">{{ formatDateTime(drawerDecision.created_at) }}</div>
-
-              <!-- Full reasoning -->
-              <div>
-                <div class="text-sm font-semibold text-(--color-text-secondary) mb-1.5">AI 推理</div>
-                <div class="text-sm text-(--color-text-primary) leading-relaxed whitespace-pre-wrap">{{ drawerDecision.reasoning }}</div>
-              </div>
-
-              <!-- Strategy verdicts (all 5) -->
-              <div>
-                <div class="text-sm font-semibold text-(--color-text-secondary) mb-2">策略結論</div>
-                <div class="flex flex-col gap-2">
-                  <div
-                    v-for="slot in getVerdictSlots(drawerDecision)"
-                    :key="slot.strategy"
-                    class="rounded-lg p-3"
-                    :style="slot.verdict ? verdictBgStyle(slot.verdict.signal, slot.verdict.confidence) : { background: 'var(--color-bg-secondary)' }"
-                  >
-                    <div class="flex items-center justify-between mb-1">
-                      <div class="flex items-center gap-1.5">
-                        <span class="text-sm font-medium text-(--color-text-primary)">{{ slot.strategy }}</span>
-                        <span v-if="slot.verdict?.timeframe" class="text-xs text-(--color-text-muted) opacity-60">{{ slot.verdict.timeframe }}</span>
-                      </div>
-                      <div v-if="slot.verdict" class="flex items-center gap-2">
-                        <span class="text-sm font-bold" :class="signalBadgeClass(slot.verdict.signal)">{{ signalLabel(slot.verdict.signal) }}</span>
-                        <span class="text-sm text-(--color-text-muted)">{{ (slot.verdict.confidence * 100).toFixed(0) }}%</span>
-                      </div>
-                      <span v-else class="text-sm text-(--color-text-muted) opacity-30">-</span>
-                    </div>
-                    <div v-if="slot.verdict?.reasoning" class="text-xs text-(--color-text-secondary) leading-relaxed">{{ slot.verdict.reasoning }}</div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Previous decisions (same symbol + action) -->
-              <div v-if="getPreviousDecisions(drawerDecision).length">
-                <div class="text-sm font-semibold text-(--color-text-secondary) mb-2">歷史紀錄</div>
-                <div class="flex flex-col gap-2">
-                  <div
-                    v-for="prev in getPreviousDecisions(drawerDecision)"
-                    :key="prev.id"
-                    class="bg-(--color-bg-secondary) rounded-lg p-3 cursor-pointer hover:bg-(--color-bg-secondary)/80 transition-colors"
-                    @click="openDrawer(prev)"
-                  >
-                    <div class="flex items-center justify-between mb-1">
-                      <div class="flex items-center gap-1.5">
-                        <div class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: actionDotColor(prev.action) }"></div>
-                        <span class="text-xs font-bold" :class="actionBadgeClass(prev.action)">{{ signalLabel(prev.action) }}</span>
-                      </div>
-                      <span class="text-xs text-(--color-text-muted) tabular-nums">{{ formatDateTime(prev.created_at) }}</span>
-                    </div>
-                    <div class="text-xs text-(--color-text-secondary) leading-relaxed line-clamp-2">{{ prev.reasoning }}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
+    <DecisionDrawer :decision="drawerDecision" :verdicts="filteredVerdicts" @close="drawerDecision = null" />
   </div>
 </template>
 
@@ -351,22 +266,4 @@ function closeDrawer() {
   color: var(--color-text-secondary);
 }
 
-.drawer-enter-active,
-.drawer-leave-active {
-  transition: all 0.25s ease;
-}
-.drawer-enter-active > :last-child,
-.drawer-leave-active > :last-child {
-  transition: transform 0.25s ease;
-}
-.drawer-enter-from,
-.drawer-leave-to {
-  opacity: 0;
-}
-.drawer-enter-from > :last-child {
-  transform: translateX(100%);
-}
-.drawer-leave-to > :last-child {
-  transform: translateX(100%);
-}
 </style>

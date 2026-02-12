@@ -23,9 +23,9 @@ onMounted(() => {
 const navItems = [
   { to: '/', label: '總覽', icon: 'dashboard' },
   { to: '/trading', label: '行情', icon: 'trading' },
+  { to: '/strategy', label: '策略', icon: 'strategy' },
   { to: '/orders', label: '現貨', icon: 'orders' },
   { to: '/futures', label: '合約', icon: 'futures' },
-  { to: '/strategy', label: '策略', icon: 'strategy' },
   { to: '/loan-guard', label: '借貸', icon: 'shield' },
   { to: '/logs', label: '日誌', icon: 'logs' },
   { to: '/config', label: '設定', icon: 'config' },

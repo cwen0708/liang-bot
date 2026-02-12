@@ -7,7 +7,7 @@ from datetime import date
 
 import pandas as pd
 
-from bot.config.settings import FuturesConfig
+from bot.config.settings import FuturesConfig, HorizonRiskConfig
 from bot.logging_config import get_logger
 from bot.risk.metrics import RiskMetrics
 from bot.strategy.signals import Signal
@@ -44,8 +44,12 @@ class FuturesRiskManager:
     # Binance USDT-M 維持保證金率（簡化，取中等層級）
     MAINTENANCE_MARGIN_RATE = 0.004
 
-    def __init__(self, config: FuturesConfig) -> None:
+    def __init__(
+        self, config: FuturesConfig,
+        horizon_config: HorizonRiskConfig | None = None,
+    ) -> None:
         self.config = config
+        self.horizon_config = horizon_config or HorizonRiskConfig()
         self._open_positions: dict[str, dict] = {}  # key = "{symbol}:{side}"
         self._daily_pnl: float = 0.0
         self._pnl_date: date = date.today()
@@ -56,6 +60,21 @@ class FuturesRiskManager:
 
     def _pos_key(self, symbol: str, side: str) -> str:
         return f"{symbol}:{side}"
+
+    # ─── Horizon 參數 ───
+
+    def _get_horizon_params(self, horizon: str) -> dict:
+        """根據 horizon 取得對應的 SL/TP 倍率和倉位因子。"""
+        hc = self.horizon_config
+        prefix = horizon if horizon in ("short", "medium", "long") else "medium"
+        return {
+            "sl_multiplier": getattr(hc, f"{prefix}_sl_multiplier"),
+            "tp_multiplier": getattr(hc, f"{prefix}_tp_multiplier"),
+            "sl_pct": getattr(hc, f"{prefix}_sl_pct"),
+            "tp_pct": getattr(hc, f"{prefix}_tp_pct"),
+            "size_factor": getattr(hc, f"{prefix}_size_factor"),
+            "min_rr": getattr(hc, f"{prefix}_min_rr"),
+        }
 
     # ─── ATR 計算 ───
 
@@ -76,6 +95,7 @@ class FuturesRiskManager:
         available_margin: float,
         margin_ratio: float,
         ohlcv: pd.DataFrame | None = None,
+        horizon: str = "medium",
     ) -> RiskMetrics | None:
         """預先計算合約風控指標，供 LLM 決策參考。"""
         if signal not in (Signal.BUY, Signal.SHORT):
@@ -98,12 +118,13 @@ class FuturesRiskManager:
 
         # SL/TP
         stop_loss, take_profit, sl_distance, tp_distance = self._calc_sl_tp(
-            side, price, ohlcv,
+            side, price, ohlcv, horizon,
         )
         rr_ratio = tp_distance / sl_distance if sl_distance > 0 else 0.0
-        passes_rr = rr_ratio >= self.config.min_risk_reward
+        hp = self._get_horizon_params(horizon)
+        passes_rr = rr_ratio >= hp["min_rr"]
         if not passes_rr and not reason:
-            reason = f"R:R {rr_ratio:.2f} < {self.config.min_risk_reward:.1f}"
+            reason = f"R:R {rr_ratio:.2f} < {hp['min_rr']:.1f} (horizon={horizon})"
 
         # ATR
         from bot.utils.indicators import compute_atr as _compute_atr
@@ -175,6 +196,8 @@ class FuturesRiskManager:
         self, signal: Signal, symbol: str, price: float,
         available_margin: float, margin_ratio: float = 0.0,
         ohlcv: pd.DataFrame | None = None,
+        horizon: str = "medium",
+        llm_size_pct: float = 0.0,
     ) -> FuturesRiskOutput:
         """評估合約交易訊號。
 
@@ -185,13 +208,15 @@ class FuturesRiskManager:
             available_margin: 可用保證金
             margin_ratio: 帳戶保證金比率
             ohlcv: K 線數據，用於計算 ATR 動態 SL/TP
+            horizon: 持倉週期 (short/medium/long)
+            llm_size_pct: LLM 建議倉位佔比
         """
         self._reset_daily_pnl_if_needed()
 
         if signal == Signal.BUY:
-            return self._evaluate_open(symbol, "long", price, available_margin, margin_ratio, ohlcv)
+            return self._evaluate_open(symbol, "long", price, available_margin, margin_ratio, ohlcv, horizon, llm_size_pct)
         elif signal == Signal.SHORT:
-            return self._evaluate_open(symbol, "short", price, available_margin, margin_ratio, ohlcv)
+            return self._evaluate_open(symbol, "short", price, available_margin, margin_ratio, ohlcv, horizon, llm_size_pct)
         elif signal == Signal.SELL:
             return self._evaluate_close(symbol, "long", price)
         elif signal == Signal.COVER:
@@ -205,6 +230,8 @@ class FuturesRiskManager:
         self, symbol: str, side: str, price: float,
         available_margin: float, margin_ratio: float,
         ohlcv: pd.DataFrame | None = None,
+        horizon: str = "medium",
+        llm_size_pct: float = 0.0,
     ) -> FuturesRiskOutput:
         """評估開倉（開多或開空）。"""
         # ── 1. 基礎風控檢查 ──
@@ -234,27 +261,26 @@ class FuturesRiskManager:
             logger.info(reason)
             return FuturesRiskOutput(approved=False, reason=reason)
 
-        # ── 2. 計算 SL/TP（ATR 動態 or 固定百分比）──
+        # ── 2. 計算 SL/TP（ATR 動態 or 固定百分比，根據 horizon）──
         stop_loss, take_profit, sl_distance, tp_distance = self._calc_sl_tp(
-            side, price, ohlcv,
+            side, price, ohlcv, horizon,
         )
 
-        # ── 3. 盈虧比 (R:R) 檢查 ──
+        # ── 3. 盈虧比 (R:R) 檢查（根據 horizon）──
+        hp = self._get_horizon_params(horizon)
         risk_reward = tp_distance / sl_distance if sl_distance > 0 else 0.0
-        if risk_reward < self.config.min_risk_reward:
+        if risk_reward < hp["min_rr"]:
             reason = (
-                f"盈虧比不足: R:R={risk_reward:.2f} < 最低要求 {self.config.min_risk_reward:.1f} "
-                f"(SL距離={sl_distance:.2f}, TP距離={tp_distance:.2f})"
+                f"盈虧比不足: R:R={risk_reward:.2f} < 最低要求 {hp['min_rr']:.1f} "
+                f"(SL距離={sl_distance:.2f}, TP距離={tp_distance:.2f}, horizon={horizon})"
             )
             logger.warning(reason)
             return FuturesRiskOutput(approved=False, reason=reason)
 
         # ── 4. 帳戶角度風險評估（槓桿放大效應）──
         leverage = self.config.leverage
-        # 實際帳戶虧損% = 停損% × 槓桿 × 倉位比例
         sl_pct = sl_distance / price
         account_risk_pct = sl_pct * leverage * self.config.max_position_pct
-        # 帳戶虧損不得超過每日虧損限制的一半（單筆交易保守控制）
         max_single_trade_risk = self.config.max_daily_loss_pct / 2
         if account_risk_pct > max_single_trade_risk:
             reason = (
@@ -278,18 +304,25 @@ class FuturesRiskManager:
                 logger.warning(reason)
                 return FuturesRiskOutput(approved=False, reason=reason)
 
-        # ── 6. 槓桿感知部位計算 ──
-        notional = available_margin * self.config.max_position_pct * leverage
+        # ── 6. 槓桿感知部位計算（根據 horizon 調整）──
+        notional = available_margin * self.config.max_position_pct * leverage * hp["size_factor"]
         quantity = notional / price
+
+        # LLM 建議的倉位佔比（取較保守者）
+        if llm_size_pct > 0:
+            llm_notional = available_margin * llm_size_pct * leverage
+            llm_quantity = llm_notional / price
+            quantity = min(quantity, llm_quantity)
+
         if quantity <= 0:
             return FuturesRiskOutput(approved=False, reason="計算數量為 0")
 
         side_label = "開多" if side == "long" else "開空"
         logger.info(
-            "風控通過 %s %s: 數量=%.8f, 槓桿=%dx, SL=%.2f, TP=%.2f, R:R=%.2f, 清算=%.2f, 帳戶風險=%.2f%%",
+            "風控通過 %s %s: 數量=%.8f, 槓桿=%dx, SL=%.2f, TP=%.2f, R:R=%.2f, 清算=%.2f, 帳戶風險=%.2f%% [horizon=%s]",
             side_label, symbol, quantity, leverage,
             stop_loss, take_profit, risk_reward, liq_price,
-            account_risk_pct * 100,
+            account_risk_pct * 100, horizon,
         )
 
         return FuturesRiskOutput(
@@ -305,31 +338,32 @@ class FuturesRiskManager:
     def _calc_sl_tp(
         self, side: str, price: float,
         ohlcv: pd.DataFrame | None,
+        horizon: str = "medium",
     ) -> tuple[float, float, float, float]:
         """計算 SL/TP 價位和距離。
 
         優先使用 ATR 動態計算；若 ATR 不可用則 fallback 到固定百分比。
+        根據 horizon 選擇對應倍率。
 
         Returns:
             (stop_loss, take_profit, sl_distance, tp_distance)
         """
+        hp = self._get_horizon_params(horizon)
         atr = 0.0
         if self.config.atr.enabled and ohlcv is not None:
             atr = self.compute_atr(ohlcv, self.config.atr.period)
 
         if atr > 0:
-            # ATR 動態 SL/TP
-            sl_distance = atr * self.config.atr.sl_multiplier
-            tp_distance = atr * self.config.atr.tp_multiplier
+            sl_distance = atr * hp["sl_multiplier"]
+            tp_distance = atr * hp["tp_multiplier"]
             logger.debug(
-                "ATR=%.2f, SL距離=%.2f (×%.1f), TP距離=%.2f (×%.1f)",
-                atr, sl_distance, self.config.atr.sl_multiplier,
-                tp_distance, self.config.atr.tp_multiplier,
+                "ATR=%.2f, SL距離=%.2f (×%.1f), TP距離=%.2f (×%.1f) [horizon=%s]",
+                atr, sl_distance, hp["sl_multiplier"],
+                tp_distance, hp["tp_multiplier"], horizon,
             )
         else:
-            # Fallback: 固定百分比
-            sl_distance = price * self.config.stop_loss_pct
-            tp_distance = price * self.config.take_profit_pct
+            sl_distance = price * hp["sl_pct"]
+            tp_distance = price * hp["tp_pct"]
             if self.config.atr.enabled:
                 logger.debug("ATR 數據不足，fallback 到固定百分比 SL/TP")
 
@@ -372,8 +406,10 @@ class FuturesRiskManager:
         entry_price: float, leverage: int = 1,
         tp_order_id: str | None = None,
         sl_order_id: str | None = None,
+        stop_loss_price: float = 0.0,
+        take_profit_price: float = 0.0,
     ) -> None:
-        """記錄新持倉。"""
+        """記錄新持倉（含 SL/TP 價位）。"""
         pos_key = self._pos_key(symbol, side)
         self._open_positions[pos_key] = {
             "symbol": symbol,
@@ -383,11 +419,14 @@ class FuturesRiskManager:
             "leverage": leverage,
             "tp_order_id": tp_order_id,
             "sl_order_id": sl_order_id,
+            "stop_loss_price": stop_loss_price,
+            "take_profit_price": take_profit_price,
         }
         side_label = "多" if side == "long" else "空"
         logger.info(
-            "新增%s倉: %s qty=%.8f entry=%.2f leverage=%dx",
+            "新增%s倉: %s qty=%.8f entry=%.2f leverage=%dx SL=%.2f TP=%.2f",
             side_label, symbol, quantity, entry_price, leverage,
+            stop_loss_price, take_profit_price,
         )
 
     def remove_position(self, symbol: str, side: str, exit_price: float) -> float:
@@ -417,7 +456,11 @@ class FuturesRiskManager:
     def check_stop_loss_take_profit(
         self, symbol: str, side: str, current_price: float,
     ) -> Signal:
-        """檢查是否觸發停損或停利（paper 模式用輪詢價格判斷）。"""
+        """檢查是否觸發停損或停利（paper 模式用輪詢價格判斷）。
+
+        優先使用開倉時儲存的 SL/TP 價位（保持 horizon 一致性），
+        若無儲存值則 fallback 到固定百分比（向後相容）。
+        """
         pos_key = self._pos_key(symbol, side)
         if pos_key not in self._open_positions:
             return Signal.HOLD
@@ -425,9 +468,20 @@ class FuturesRiskManager:
         position = self._open_positions[pos_key]
         entry = position["entry_price"]
 
+        # 優先使用開倉時儲存的 SL/TP 價位
+        stop_loss = position.get("stop_loss_price", 0.0)
+        take_profit = position.get("take_profit_price", 0.0)
+
+        # Fallback: 若無儲存值（舊持倉或恢復時），用固定百分比
+        if stop_loss <= 0 or take_profit <= 0:
+            if side == "long":
+                stop_loss = entry * (1 - self.config.stop_loss_pct)
+                take_profit = entry * (1 + self.config.take_profit_pct)
+            else:
+                stop_loss = entry * (1 + self.config.stop_loss_pct)
+                take_profit = entry * (1 - self.config.take_profit_pct)
+
         if side == "long":
-            stop_loss = entry * (1 - self.config.stop_loss_pct)
-            take_profit = entry * (1 + self.config.take_profit_pct)
             if current_price <= stop_loss:
                 logger.warning(
                     "觸發多倉停損: %s 現價=%.2f <= 停損=%.2f",
@@ -441,8 +495,6 @@ class FuturesRiskManager:
                 )
                 return Signal.SELL
         else:  # short
-            stop_loss = entry * (1 + self.config.stop_loss_pct)
-            take_profit = entry * (1 - self.config.take_profit_pct)
             if current_price >= stop_loss:
                 logger.warning(
                     "觸發空倉停損: %s 現價=%.2f >= 停損=%.2f",

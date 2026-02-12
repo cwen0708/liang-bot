@@ -7,7 +7,7 @@ from datetime import date
 
 import pandas as pd
 
-from bot.config.settings import SpotConfig
+from bot.config.settings import HorizonRiskConfig, SpotConfig
 from bot.logging_config import get_logger
 from bot.risk.metrics import RiskMetrics
 from bot.risk.position_sizer import PercentageSizer
@@ -38,8 +38,12 @@ class RiskManager:
     5. 預計算風控指標供 LLM 參考
     """
 
-    def __init__(self, config: SpotConfig) -> None:
+    def __init__(
+        self, config: SpotConfig,
+        horizon_config: HorizonRiskConfig | None = None,
+    ) -> None:
         self.config = config
+        self.horizon_config = horizon_config or HorizonRiskConfig()
         self.sizer = PercentageSizer(config.max_position_pct)
         self._open_positions: dict[str, dict] = {}
         self._daily_pnl: float = 0.0
@@ -60,6 +64,7 @@ class RiskManager:
         price: float,
         balance: float,
         ohlcv: pd.DataFrame | None = None,
+        horizon: str = "medium",
     ) -> RiskMetrics | None:
         """預先計算多種風控指標，供 LLM 決策參考。
 
@@ -81,14 +86,15 @@ class RiskManager:
             reason = f"已持有 {symbol}"
 
         # ATR + SL/TP
-        sl_distance, tp_distance, atr_val = self._calc_sl_tp_distance(price, ohlcv)
+        sl_distance, tp_distance, atr_val = self._calc_sl_tp_distance(price, ohlcv, horizon)
         sl_price = price - sl_distance
         tp_price = price + tp_distance
         rr_ratio = tp_distance / sl_distance if sl_distance > 0 else 0.0
-        passes_rr = rr_ratio >= self.config.min_risk_reward
+        hp = self._get_horizon_params(horizon)
+        passes_rr = rr_ratio >= hp["min_rr"]
 
         if not passes_rr and not reason:
-            reason = f"R:R {rr_ratio:.2f} < {self.config.min_risk_reward:.1f}"
+            reason = f"R:R {rr_ratio:.2f} < {hp['min_rr']:.1f} (horizon={horizon})"
 
         metrics = RiskMetrics(
             stop_loss_price=sl_price,
@@ -135,11 +141,29 @@ class RiskManager:
         return metrics
 
     # ------------------------------------------------------------------
+    # Horizon 參數取得
+    # ------------------------------------------------------------------
+
+    def _get_horizon_params(self, horizon: str) -> dict:
+        """根據 horizon 取得對應的 SL/TP 倍率和倉位因子。"""
+        hc = self.horizon_config
+        prefix = horizon if horizon in ("short", "medium", "long") else "medium"
+        return {
+            "sl_multiplier": getattr(hc, f"{prefix}_sl_multiplier"),
+            "tp_multiplier": getattr(hc, f"{prefix}_tp_multiplier"),
+            "sl_pct": getattr(hc, f"{prefix}_sl_pct"),
+            "tp_pct": getattr(hc, f"{prefix}_tp_pct"),
+            "size_factor": getattr(hc, f"{prefix}_size_factor"),
+            "min_rr": getattr(hc, f"{prefix}_min_rr"),
+        }
+
+    # ------------------------------------------------------------------
     # SL/TP 計算（ATR 動態 + fallback 固定百分比）
     # ------------------------------------------------------------------
 
     def _calc_sl_tp_distance(
         self, price: float, ohlcv: pd.DataFrame | None,
+        horizon: str = "medium",
     ) -> tuple[float, float, float]:
         """計算 SL/TP 距離。ATR 啟用且數據充足時使用動態計算，否則 fallback。
 
@@ -148,21 +172,22 @@ class RiskManager:
         """
         from bot.utils.indicators import compute_atr
 
+        hp = self._get_horizon_params(horizon)
         atr = 0.0
         if self.config.atr.enabled and ohlcv is not None:
             atr = compute_atr(ohlcv, self.config.atr.period)
 
         if atr > 0:
-            sl_distance = atr * self.config.atr.sl_multiplier
-            tp_distance = atr * self.config.atr.tp_multiplier
+            sl_distance = atr * hp["sl_multiplier"]
+            tp_distance = atr * hp["tp_multiplier"]
             logger.debug(
-                "ATR=%.2f, SL距離=%.2f (×%.1f), TP距離=%.2f (×%.1f)",
-                atr, sl_distance, self.config.atr.sl_multiplier,
-                tp_distance, self.config.atr.tp_multiplier,
+                "ATR=%.2f, SL距離=%.2f (×%.1f), TP距離=%.2f (×%.1f) [horizon=%s]",
+                atr, sl_distance, hp["sl_multiplier"],
+                tp_distance, hp["tp_multiplier"], horizon,
             )
         else:
-            sl_distance = price * self.config.stop_loss_pct
-            tp_distance = price * self.config.take_profit_pct
+            sl_distance = price * hp["sl_pct"]
+            tp_distance = price * hp["tp_pct"]
 
         return sl_distance, tp_distance, atr
 
@@ -173,12 +198,14 @@ class RiskManager:
     def evaluate(
         self, signal: Signal, symbol: str, price: float, balance: float,
         ohlcv: pd.DataFrame | None = None,
+        horizon: str = "medium",
+        llm_size_pct: float = 0.0,
     ) -> RiskOutput:
         """評估交易訊號是否通過風控。每日虧損限制只阻止買入，不阻止賣出。"""
         self._reset_daily_pnl_if_needed()
 
         if signal == Signal.BUY:
-            return self._evaluate_buy(symbol, price, balance, ohlcv)
+            return self._evaluate_buy(symbol, price, balance, ohlcv, horizon, llm_size_pct)
         elif signal == Signal.SELL:
             return self._evaluate_sell(symbol, price)
         else:
@@ -187,6 +214,8 @@ class RiskManager:
     def _evaluate_buy(
         self, symbol: str, price: float, balance: float,
         ohlcv: pd.DataFrame | None = None,
+        horizon: str = "medium",
+        llm_size_pct: float = 0.0,
     ) -> RiskOutput:
         # 每日虧損限制（只阻止開新倉，不阻止賣出）
         if self._daily_pnl < -(balance * self.config.max_daily_loss_pct):
@@ -206,19 +235,27 @@ class RiskManager:
             logger.info(reason)
             return RiskOutput(approved=False, reason=reason)
 
-        # 計算部位
-        quantity = self.sizer.calculate(balance, price)
+        # 計算部位（根據 horizon 調整倉位大小）
+        hp = self._get_horizon_params(horizon)
+        base_quantity = self.sizer.calculate(balance, price)
+        quantity = base_quantity * hp["size_factor"]
+
+        # LLM 建議的倉位佔比（取較保守者）
+        if llm_size_pct > 0:
+            llm_quantity = (balance * llm_size_pct) / price
+            quantity = min(quantity, llm_quantity)
+
         if quantity <= 0:
             return RiskOutput(approved=False, reason="計算數量為 0")
 
-        # 動態 SL/TP
-        sl_distance, tp_distance, _ = self._calc_sl_tp_distance(price, ohlcv)
+        # 動態 SL/TP（根據 horizon）
+        sl_distance, tp_distance, _ = self._calc_sl_tp_distance(price, ohlcv, horizon)
         stop_loss = price - sl_distance
         take_profit = price + tp_distance
 
         logger.info(
-            "風控通過 BUY %s: 數量=%.8f, 停損=%.2f, 停利=%.2f",
-            symbol, quantity, stop_loss, take_profit,
+            "風控通過 BUY %s: 數量=%.8f, 停損=%.2f, 停利=%.2f [horizon=%s]",
+            symbol, quantity, stop_loss, take_profit, horizon,
         )
 
         return RiskOutput(
@@ -247,15 +284,22 @@ class RiskManager:
         entry_price: float,
         tp_order_id: str | None = None,
         sl_order_id: str | None = None,
+        stop_loss_price: float = 0.0,
+        take_profit_price: float = 0.0,
     ) -> None:
-        """記錄新持倉（含 SL/TP 掛單 ID）。"""
+        """記錄新持倉（含 SL/TP 價位和掛單 ID）。"""
         self._open_positions[symbol] = {
             "quantity": quantity,
             "entry_price": entry_price,
             "tp_order_id": tp_order_id,
             "sl_order_id": sl_order_id,
+            "stop_loss_price": stop_loss_price,
+            "take_profit_price": take_profit_price,
         }
-        logger.info("新增持倉: %s qty=%.8f entry=%.2f", symbol, quantity, entry_price)
+        logger.info(
+            "新增持倉: %s qty=%.8f entry=%.2f SL=%.2f TP=%.2f",
+            symbol, quantity, entry_price, stop_loss_price, take_profit_price,
+        )
 
     def remove_position(self, symbol: str, exit_price: float) -> float:
         """移除持倉並記錄損益。"""
@@ -276,16 +320,26 @@ class RiskManager:
         self, symbol: str, current_price: float,
         ohlcv: pd.DataFrame | None = None,
     ) -> Signal:
-        """檢查是否觸發停損或停利（paper 模式用輪詢價格判斷）。"""
+        """檢查是否觸發停損或停利（paper 模式用輪詢價格判斷）。
+
+        優先使用開倉時儲存的 SL/TP 價位（保持 horizon 一致性），
+        若無儲存值則 fallback 到即時計算（向後相容）。
+        """
         if symbol not in self._open_positions:
             return Signal.HOLD
 
         position = self._open_positions[symbol]
         entry = position["entry_price"]
 
-        sl_distance, tp_distance, _ = self._calc_sl_tp_distance(entry, ohlcv)
-        stop_loss = entry - sl_distance
-        take_profit = entry + tp_distance
+        # 優先使用開倉時儲存的 SL/TP 價位
+        stop_loss = position.get("stop_loss_price", 0.0)
+        take_profit = position.get("take_profit_price", 0.0)
+
+        # Fallback: 若無儲存值（舊持倉或恢復時），用 medium horizon 計算
+        if stop_loss <= 0 or take_profit <= 0:
+            sl_distance, tp_distance, _ = self._calc_sl_tp_distance(entry, ohlcv)
+            stop_loss = entry - sl_distance
+            take_profit = entry + tp_distance
 
         if current_price <= stop_loss:
             logger.warning("觸發停損: %s 現價=%.2f <= 停損=%.2f", symbol, current_price, stop_loss)

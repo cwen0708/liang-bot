@@ -32,6 +32,94 @@
       "filled": 0.0012777853627007408,
       "status": "closed",
       "timestamp": 1770729327014
+    },
+    {
+      "id": "paper_1770825570013",
+      "symbol": "BTC/USDT",
+      "side": "sell",
+      "type": "market",
+      "amount": 3.7250685149121e-05,
+      "price": 66521.11,
+      "filled": 3.7250685149121e-05,
+      "status": "closed",
+      "timestamp": 1770825570013
+    },
+    {
+      "id": "paper_1770825638012",
+      "symbol": "ETH/USDT",
+      "side": "sell",
+      "type": "market",
+      "amount": 0.00127778536270074,
+      "price": 1928.12,
+      "filled": 0.00127778536270074,
+      "status": "closed",
+      "timestamp": 1770825638012
+    },
+    {
+      "id": "paper_1770826091057",
+      "symbol": "BNB/USDT",
+      "side": "sell",
+      "type": "market",
+      "amount": 0.00408872613592974,
+      "price": 595.74,
+      "filled": 0.00408872613592974,
+      "status": "closed",
+      "timestamp": 1770826091057
+    },
+    {
+      "id": "paper_1770841714000",
+      "symbol": "BTC/USDT",
+      "side": "buy",
+      "type": "market",
+      "amount": 9.015376494814727e-05,
+      "price": 67298.43,
+      "filled": 9.015376494814727e-05,
+      "status": "closed",
+      "timestamp": 1770841714000
+    },
+    {
+      "id": "paper_1770843068013",
+      "symbol": "BTC/USDT",
+      "side": "sell",
+      "type": "market",
+      "amount": 9.01537649481473e-05,
+      "price": 67558.99,
+      "filled": 9.01537649481473e-05,
+      "status": "closed",
+      "timestamp": 1770843068013
+    },
+    {
+      "id": "paper_1770846505012",
+      "symbol": "BTC/USDT",
+      "side": "buy",
+      "type": "market",
+      "amount": 8.932138508376314e-05,
+      "price": 67980.21,
+      "filled": 8.932138508376314e-05,
+      "status": "closed",
+      "timestamp": 1770846505012
+    },
+    {
+      "id": "paper_1770846772013",
+      "symbol": "ETH/USDT",
+      "side": "buy",
+      "type": "market",
+      "amount": 0.0030678753532064635,
+      "price": 1977.2,
+      "filled": 0.0030678753532064635,
+      "status": "closed",
+      "timestamp": 1770846772013
+    },
+    {
+      "id": "paper_1770852120013",
+      "symbol": "ETH/USDT",
+      "side": "sell",
+      "type": "market",
+      "amount": 0.00306787535320646,
+      "price": 1934.85,
+      "filled": 0.00306787535320646,
+      "status": "closed",
+      "timestamp": 1770852120013
     }
   ]
 }

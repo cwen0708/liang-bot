@@ -5,6 +5,7 @@ from __future__ import annotations
 from bot.llm.schemas import PortfolioState
 from bot.risk.metrics import RiskMetrics
 from bot.strategy.signals import StrategyVerdict
+from bot.utils.indicators import TimeframeSummary
 
 
 def summarize_verdicts(verdicts: list[StrategyVerdict]) -> str:
@@ -149,5 +150,61 @@ def summarize_risk_metrics(
     # 警告
     if not metrics.passes_min_rr or metrics.reason:
         lines.append(f"\n⚠️ **風控警告**: {metrics.reason}")
+
+    return "\n".join(lines)
+
+
+def summarize_multi_timeframe(summaries: list[TimeframeSummary]) -> str:
+    """將多時間框架技術指標摘要轉為 Markdown 表格。"""
+    if not summaries:
+        return ""
+
+    trend_map = {"bullish": "看漲", "bearish": "看跌", "neutral": "盤整"}
+    macd_map = {"bullish": "多頭", "bearish": "空頭", "neutral": "中性"}
+    vol_map = {"increasing": "放量", "decreasing": "縮量", "flat": "持平"}
+
+    lines = [
+        "## 多時間框架分析\n",
+        "| 時間框架 | 趨勢 | RSI | MACD方向 | BB%B | 成交量 | 波幅(ATR%) |",
+        "|----------|------|-----|---------|------|--------|-----------|",
+    ]
+
+    bullish_count = 0
+    for s in summaries:
+        trend_label = trend_map.get(s.trend, s.trend)
+        macd_label = macd_map.get(s.macd_direction, s.macd_direction)
+        vol_label = vol_map.get(s.volume_trend, s.volume_trend)
+
+        rsi_str = f"{s.rsi_14:.0f}"
+        if s.rsi_14 <= 30:
+            rsi_str += "(超賣)"
+        elif s.rsi_14 >= 70:
+            rsi_str += "(超買)"
+
+        lines.append(
+            f"| {s.timeframe} | {trend_label} | {rsi_str} | {macd_label} | "
+            f"{s.bb_pct_b:.2f} | {vol_label} | {s.atr_pct:.2%} |"
+        )
+
+        if s.trend == "bullish":
+            bullish_count += 1
+
+    total = len(summaries)
+    if bullish_count == total:
+        comment = "全部看漲，多頭共振強烈"
+    elif bullish_count == 0:
+        bearish_count = sum(1 for s in summaries if s.trend == "bearish")
+        if bearish_count == total:
+            comment = "全部看跌，空頭共振強烈"
+        else:
+            comment = "偏空，無看漲框架"
+    elif bullish_count > total / 2:
+        comment = f"偏多: {bullish_count}/{total} 時間框架看漲"
+    elif bullish_count < total / 2:
+        comment = f"偏空: {bullish_count}/{total} 時間框架看漲"
+    else:
+        comment = "多空分歧，方向不明"
+
+    lines.append(f"\n**{comment}**。")
 
     return "\n".join(lines)

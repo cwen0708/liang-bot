@@ -129,7 +129,7 @@ class TradingBot:
         # 訂單流快取載入追蹤
         self._cache_loaded: set[str] = set()
 
-        self.risk_manager = RiskManager(self.settings.spot)
+        self.risk_manager = RiskManager(self.settings.spot, self.settings.horizon_risk)
         self.executor = OrderExecutor(self.exchange, self.settings.spot.mode)
         self.order_manager = OrderManager()
 
@@ -170,6 +170,7 @@ class TradingBot:
 
         self._running = False
         self._start_time: float = 0.0
+        self._last_llm_size_pct: float = 0.0
 
     def _restore_positions(self) -> None:
         """從 Supabase positions 表恢復持倉到 RiskManager（重啟接續）。"""
@@ -192,7 +193,8 @@ class TradingBot:
             fc.pairs, fc.leverage, fc.margin_type, fc.mode.value,
         )
         self._futures_exchange = FuturesBinanceClient(self.settings.exchange, fc)
-        self._futures_risk = FuturesRiskManager(fc)
+        self._futures_data_fetcher = DataFetcher(self._futures_exchange)
+        self._futures_risk = FuturesRiskManager(fc, self.settings.horizon_risk)
         self._futures_executor = FuturesOrderExecutor(self._futures_exchange, fc.mode)
         self._create_futures_strategies()
         self._restore_futures_positions()
@@ -546,11 +548,17 @@ class TradingBot:
                 except Exception as e:
                     logger.warning("%s預計算風控指標失敗: %s", _L2, e)
 
-        # ── 5. LLM 決策 或 加權投票 ──
+        # ── 5. 多時間框架摘要 ──
+        mtf_summary = self._fetch_mtf_summary(symbol)
+
+        # ── 6. LLM 決策 或 加權投票 ──
         self._llm_override = False
-        final_signal, final_confidence = self._make_decision(
+        self._last_decision = None
+        self._last_llm_size_pct = 0.0  # 每個交易對重置，避免跨幣對污染
+        final_signal, final_confidence, horizon = self._make_decision(
             verdicts, symbol, current_price, cycle_id,
             risk_metrics=risk_metrics,
+            mtf_summary=mtf_summary,
         )
 
         if final_signal == Signal.HOLD:
@@ -567,11 +575,11 @@ class TradingBot:
             return
 
         logger.info(
-            "%s→ %s (信心 %.2f)",
-            _L2, final_signal.value, final_confidence,
+            "%s→ %s (信心 %.2f, horizon=%s)",
+            _L2, final_signal.value, final_confidence, horizon,
         )
 
-        # ── 5. 風控 + 執行 ──
+        # ── 7. 風控 + 執行 ──
         if final_signal == Signal.BUY:
             try:
                 balance = self.exchange.get_balance()
@@ -595,8 +603,13 @@ class TradingBot:
                 logger.warning("%s取得餘額失敗，跳過買入: %s", _L2, e)
                 return
 
+            # 取得 LLM 建議的倉位佔比
+            llm_size_pct = self._last_llm_size_pct
+
             risk_output = self.risk_manager.evaluate(
-                final_signal, symbol, current_price, usdt_balance
+                final_signal, symbol, current_price, usdt_balance,
+                horizon=horizon,
+                llm_size_pct=llm_size_pct,
             )
             if not risk_output.approved:
                 logger.info("%s風控拒絕: %s", _L2, risk_output.reason)
@@ -618,11 +631,16 @@ class TradingBot:
         cycle_id: str = "",
         market_type: str = "spot",
         risk_metrics: "RiskMetrics | None" = None,
-    ) -> tuple[Signal, float]:
-        """所有非 HOLD 決策強制過 LLM 審查；LLM 失敗直接 HOLD。"""
+        mtf_summary: str = "",
+    ) -> tuple[Signal, float, str]:
+        """所有非 HOLD 決策強制過 LLM 審查；LLM 失敗直接 HOLD。
+
+        Returns:
+            (signal, confidence, horizon)
+        """
         non_hold = [v for v in verdicts if v.signal != Signal.HOLD]
         if not non_hold:
-            return Signal.HOLD, 0.0
+            return Signal.HOLD, 0.0, "medium"
 
         # ── LLM 審查（強制） ──
         if self.llm_engine.enabled:
@@ -639,16 +657,24 @@ class TradingBot:
                     current_price=current_price,
                     market_type=market_type,
                     risk_metrics=risk_metrics,
+                    mtf_summary=mtf_summary,
                 )
                 self._db.insert_llm_decision(
                     symbol, decision.action, decision.confidence,
                     decision.reasoning, self.settings.llm.model,
                     cycle_id, market_type=market_type,
                 )
+
+                # 驗證 horizon 值
+                horizon = decision.horizon if decision.horizon in ("short", "medium", "long") else "medium"
+
+                # 儲存 LLM 建議的倉位佔比供風控參考
+                self._last_llm_size_pct = decision.position_size_pct
+
                 logger.info(
-                    "%s[LLM] %s (信心 %.2f) — %s",
+                    "%s[LLM] %s (信心 %.2f, horizon=%s) — %s",
                     _L2, decision.action, decision.confidence,
-                    decision.reasoning[:100],
+                    horizon, decision.reasoning[:100],
                 )
                 action_map = {
                     "BUY": Signal.BUY, "SELL": Signal.SELL,
@@ -671,14 +697,14 @@ class TradingBot:
                             "%s[LLM] 決策 %s 無策略支持且信心不足 (%.2f < 0.7) → HOLD",
                             _L2, decision.action, decision.confidence,
                         )
-                        return Signal.HOLD, 0.0
+                        return Signal.HOLD, 0.0, "medium"
 
-                return llm_signal, decision.confidence
+                return llm_signal, decision.confidence, horizon
             except Exception as e:
                 logger.warning("%sLLM 決策失敗 → HOLD: %s", _L2, e)
 
         # LLM 關閉或失敗 → 直接 HOLD
-        return Signal.HOLD, 0.0
+        return Signal.HOLD, 0.0, "medium"
 
     def _build_portfolio_state(
         self, symbol: str, current_price: float
@@ -760,6 +786,49 @@ class TradingBot:
             daily_risk_remaining=available * self.settings.futures.max_daily_loss_pct + self._futures_risk._daily_pnl,
         )
 
+    def _fetch_mtf_summary(self, symbol: str, market_type: str = "spot") -> str:
+        """抓取多時間框架 K 線並產生 Markdown 摘要。失敗回傳空字串。"""
+        mtf_cfg = self.settings.mtf
+        if not mtf_cfg.enabled:
+            return ""
+
+        try:
+            fetcher = (
+                self._futures_data_fetcher
+                if market_type == "futures" and hasattr(self, "_futures_data_fetcher")
+                else self.data_fetcher
+            )
+            tf_data = fetcher.fetch_multi_timeframe(
+                symbol,
+                timeframes=list(mtf_cfg.timeframes),
+                limit=mtf_cfg.candle_limit,
+                cache_ttl=mtf_cfg.cache_ttl_seconds,
+            )
+            if not tf_data:
+                return ""
+
+            from bot.utils.indicators import compute_mtf_summary
+            from bot.llm.summarizer import summarize_multi_timeframe
+
+            summaries = []
+            for tf, df in tf_data.items():
+                s = compute_mtf_summary(df, tf)
+                if s:
+                    summaries.append(s)
+
+            if not summaries:
+                return ""
+
+            result = summarize_multi_timeframe(summaries)
+            logger.info(
+                "%s[MTF] 已產生 %d 個時間框架摘要 (%s)",
+                _L2, len(summaries), ", ".join(s.timeframe for s in summaries),
+            )
+            return result
+        except Exception as e:
+            logger.warning("%s[MTF] 多框架摘要生成失敗: %s", _L2, e)
+            return ""
+
     def _execute_buy(self, symbol: str, price: float, risk_output,
                      cycle_id: str = "") -> None:
         order = self.executor.execute(Signal.BUY, symbol, risk_output)
@@ -782,6 +851,8 @@ class TradingBot:
                 symbol, risk_output.quantity, fill_price,
                 tp_order_id=tp_order_id,
                 sl_order_id=sl_order_id,
+                stop_loss_price=risk_output.stop_loss_price,
+                take_profit_price=risk_output.take_profit_price,
             )
             self.order_manager.add_order(order)
             _mode = self.settings.spot.mode.value
@@ -933,12 +1004,17 @@ class TradingBot:
             except Exception as e:
                 logger.warning("%s[合約] 預計算風控指標失敗: %s", _L2, e)
 
-        # 先做 LLM 審查（用現有 LLM 引擎，傳入 market_type="futures"）
+        # ── 5. 多時間框架摘要 ──
+        mtf_summary = self._fetch_mtf_summary(symbol, market_type="futures")
+
+        # ── 6. LLM 審查（用現有 LLM 引擎，傳入 market_type="futures"）──
         self._llm_override = False
-        final_signal, final_confidence = self._make_decision(
+        self._last_llm_size_pct = 0.0  # 每個交易對重置，避免跨幣對污染
+        final_signal, final_confidence, horizon = self._make_decision(
             verdicts, symbol, current_price, cycle_id,
             market_type="futures",
             risk_metrics=risk_metrics,
+            mtf_summary=mtf_summary,
         )
 
         if final_signal == Signal.HOLD:
@@ -957,11 +1033,14 @@ class TradingBot:
         if final_signal == Signal.HOLD:
             return
 
-        logger.info("%s[合約] → %s (信心 %.2f)", _L2, final_signal.value, final_confidence)
+        logger.info("%s[合約] → %s (信心 %.2f, horizon=%s)", _L2, final_signal.value, final_confidence, horizon)
 
-        # ── 5. 風控 + 執行 ──
+        # ── 7. 風控 + 執行 ──
         if final_signal in (Signal.BUY, Signal.SHORT):
-            self._execute_futures_open(symbol, final_signal, current_price, cycle_id, ohlcv=df)
+            self._execute_futures_open(
+                symbol, final_signal, current_price, cycle_id,
+                ohlcv=df, horizon=horizon,
+            )
         elif final_signal in (Signal.SELL, Signal.COVER):
             side = "long" if final_signal == Signal.SELL else "short"
             self._execute_futures_close(symbol, side, current_price, cycle_id)
@@ -991,13 +1070,22 @@ class TradingBot:
                 return Signal.COVER  # 平空
             else:
                 return Signal.BUY    # 開多
-        elif signal in (Signal.SHORT, Signal.COVER):
-            return signal  # LLM 直接回傳 SHORT/COVER
+        elif signal == Signal.SHORT:
+            if has_short:
+                logger.info("%s[合約] 已有空倉 %s，忽略 SHORT", _L2, symbol)
+                return Signal.HOLD
+            return Signal.SHORT
+        elif signal == Signal.COVER:
+            if not has_short:
+                logger.info("%s[合約] 無空倉 %s，忽略 COVER", _L2, symbol)
+                return Signal.HOLD
+            return Signal.COVER
         return Signal.HOLD
 
     def _execute_futures_open(self, symbol: str, signal: Signal,
                               price: float, cycle_id: str = "",
-                              ohlcv: pd.DataFrame | None = None) -> None:
+                              ohlcv: pd.DataFrame | None = None,
+                              horizon: str = "medium") -> None:
         """執行合約開倉（開多或開空）。"""
         assert self._futures_exchange and self._futures_risk and self._futures_executor
 
@@ -1012,12 +1100,20 @@ class TradingBot:
             logger.warning("%s[合約] 取得保證金失敗: %s", _L2, e)
             return
 
+        llm_size_pct = self._last_llm_size_pct
+
         risk_output = self._futures_risk.evaluate(
             signal, symbol, price, available, margin_ratio, ohlcv=ohlcv,
+            horizon=horizon, llm_size_pct=llm_size_pct,
         )
         if not risk_output.approved:
             logger.info("%s[合約] 風控拒絕: %s", _L2, risk_output.reason)
             return
+
+        # LLM 覆蓋策略時倉位縮半（與現貨一致）
+        if self._llm_override and risk_output.quantity > 0:
+            risk_output.quantity /= 2
+            logger.info("%s[合約][覆蓋] 倉位縮半: %.6f", _L2, risk_output.quantity)
 
         order = self._futures_executor.execute(signal, symbol, risk_output)
         if not order:
@@ -1039,6 +1135,8 @@ class TradingBot:
         self._futures_risk.add_position(
             symbol, side, risk_output.quantity, fill_price, leverage,
             tp_order_id=tp_order_id, sl_order_id=sl_order_id,
+            stop_loss_price=risk_output.stop_loss_price,
+            take_profit_price=risk_output.take_profit_price,
         )
 
         _mode = self.settings.futures.mode.value

@@ -40,6 +40,7 @@ class LLMDecisionEngine:
         current_price: float,
         market_type: str = "spot",
         risk_metrics: RiskMetrics | None = None,
+        mtf_summary: str = "",
     ) -> LLMDecision:
         """
         根據策略結論和倉位狀態做出 LLM 決策。
@@ -74,6 +75,7 @@ class LLMDecisionEngine:
                 current_price=current_price,
                 market_type=market_type,
                 risk_metrics_summary=risk_summary,
+                mtf_summary=mtf_summary,
             )
 
             # 3. 呼叫 LLM
@@ -99,11 +101,12 @@ class LLMDecisionEngine:
         current_price: float,
         market_type: str = "spot",
         risk_metrics: RiskMetrics | None = None,
+        mtf_summary: str = "",
     ) -> LLMDecision:
         """同步版本的 decide。"""
         import asyncio
         return asyncio.run(
-            self.decide(verdicts, portfolio, symbol, current_price, market_type, risk_metrics),
+            self.decide(verdicts, portfolio, symbol, current_price, market_type, risk_metrics, mtf_summary),
         )
 
     @staticmethod

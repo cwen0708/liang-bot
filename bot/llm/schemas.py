@@ -61,3 +61,4 @@ class LLMDecision(BaseModel):
     take_profit_pct: float = Field(default=0.06, description="建議停利百分比")
     reasoning: str = Field(default="", description="決策推理過程")
     position_size_pct: float = Field(default=0.02, description="建議倉位佔比")
+    horizon: str = Field(default="medium", description="持倉週期: short/medium/long")

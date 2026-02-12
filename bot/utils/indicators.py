@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pandas as pd
 
 from bot.logging_config import get_logger
@@ -165,3 +167,123 @@ def compute_bollinger_bands(
         "lower": latest_lower,
         "pct_b": pct_b,
     }
+
+
+# ---------------------------------------------------------------------------
+# Multi-Timeframe Summary
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TimeframeSummary:
+    """單一時間框架的技術指標快照。"""
+    timeframe: str
+    close: float
+    change_pct: float
+    trend: str              # "bullish" / "bearish" / "neutral"
+    sma_20: float
+    sma_50: float | None
+    price_vs_sma20: str     # "above" / "below"
+    rsi_14: float
+    macd_histogram: float
+    macd_direction: str     # "bullish" / "bearish" / "neutral"
+    bb_pct_b: float
+    volume_trend: str       # "increasing" / "decreasing" / "flat"
+    atr_14: float
+    atr_pct: float
+
+
+def compute_mtf_summary(df: pd.DataFrame, timeframe: str) -> TimeframeSummary | None:
+    """從 OHLCV DataFrame 計算緊湊的技術指標快照。
+
+    至少需要 20 根 K 線。每個子指標獨立 try/except，部分失敗仍可產出結果。
+    """
+    if df is None or len(df) < 20:
+        return None
+
+    close = df["close"]
+    latest_close = float(close.iloc[-1])
+    first_close = float(close.iloc[0])
+    change_pct = (latest_close - first_close) / first_close if first_close > 0 else 0.0
+
+    # SMA 20 / 50
+    sma_20 = float(close.rolling(20).mean().iloc[-1])
+    sma_50 = float(close.rolling(50).mean().iloc[-1]) if len(df) >= 50 else None
+    price_vs_sma20 = "above" if latest_close > sma_20 else "below"
+
+    # Trend: price vs SMA20 + SMA20 slope
+    sma_20_5ago = float(close.rolling(20).mean().iloc[-5]) if len(df) >= 24 else sma_20
+    if latest_close > sma_20 and sma_20 > sma_20_5ago:
+        trend = "bullish"
+    elif latest_close < sma_20 and sma_20 < sma_20_5ago:
+        trend = "bearish"
+    else:
+        trend = "neutral"
+
+    # RSI 14
+    rsi_val = 50.0
+    try:
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+        rs = gain / loss.replace(0, 1e-10)
+        rsi_series = 100 - (100 / (1 + rs))
+        v = rsi_series.iloc[-1]
+        rsi_val = float(v) if pd.notna(v) else 50.0
+    except Exception:
+        pass
+
+    # MACD (12, 26, 9)
+    macd_hist = 0.0
+    macd_dir = "neutral"
+    try:
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        hist = macd_line - signal_line
+        macd_hist = float(hist.iloc[-1]) if pd.notna(hist.iloc[-1]) else 0.0
+        prev_hist = float(hist.iloc[-2]) if pd.notna(hist.iloc[-2]) else 0.0
+        if macd_hist > 0 and macd_hist > prev_hist:
+            macd_dir = "bullish"
+        elif macd_hist < 0 and macd_hist < prev_hist:
+            macd_dir = "bearish"
+    except Exception:
+        pass
+
+    # Bollinger %B
+    bb = compute_bollinger_bands(df)
+    bb_pct_b = bb.get("pct_b", 0.5)
+
+    # Volume trend (最近 5 根 vs 前 5 根)
+    vol_trend = "flat"
+    try:
+        recent_vol = float(df["volume"].iloc[-5:].mean())
+        prev_vol = float(df["volume"].iloc[-10:-5].mean())
+        if prev_vol > 0:
+            if recent_vol > prev_vol * 1.2:
+                vol_trend = "increasing"
+            elif recent_vol < prev_vol * 0.8:
+                vol_trend = "decreasing"
+    except Exception:
+        pass
+
+    # ATR
+    atr_val = compute_atr(df, 14)
+    atr_pct = atr_val / latest_close if latest_close > 0 else 0.0
+
+    return TimeframeSummary(
+        timeframe=timeframe,
+        close=latest_close,
+        change_pct=change_pct,
+        trend=trend,
+        sma_20=sma_20,
+        sma_50=sma_50,
+        price_vs_sma20=price_vs_sma20,
+        rsi_14=rsi_val,
+        macd_histogram=macd_hist,
+        macd_direction=macd_dir,
+        bb_pct_b=bb_pct_b,
+        volume_trend=vol_trend,
+        atr_14=atr_val,
+        atr_pct=atr_pct,
+    )

@@ -105,6 +105,41 @@ class AtrConfig:
 
 
 @dataclass(frozen=True)
+class MultiTimeframeConfig:
+    """多時間框架分析配置。"""
+    enabled: bool = True
+    timeframes: tuple[str, ...] = ("1d", "4h", "1h", "15m")
+    candle_limit: int = 50
+    cache_ttl_seconds: int = 300
+
+
+@dataclass(frozen=True)
+class HorizonRiskConfig:
+    """持倉週期動態風控配置 — short / medium / long 各自的參數。"""
+    # short（短線：數小時~1天）
+    short_sl_multiplier: float = 1.0
+    short_tp_multiplier: float = 2.0
+    short_sl_pct: float = 0.02
+    short_tp_pct: float = 0.04
+    short_size_factor: float = 1.2
+    short_min_rr: float = 1.5
+    # medium（中線：數天~1週）— 使用現有 ATR/固定配置作為基準
+    medium_sl_multiplier: float = 1.5
+    medium_tp_multiplier: float = 3.0
+    medium_sl_pct: float = 0.03
+    medium_tp_pct: float = 0.06
+    medium_size_factor: float = 1.0
+    medium_min_rr: float = 2.0
+    # long（長線：數週~月）
+    long_sl_multiplier: float = 2.5
+    long_tp_multiplier: float = 5.0
+    long_sl_pct: float = 0.05
+    long_tp_pct: float = 0.15
+    long_size_factor: float = 0.6
+    long_min_rr: float = 2.5
+
+
+@dataclass(frozen=True)
 class FuturesConfig:
     """USDT-M 永續合約配置。"""
     enabled: bool = False
@@ -151,6 +186,8 @@ class Settings:
     strategies_config: StrategiesConfig = field(default_factory=StrategiesConfig)
     loan_guard: LoanGuardConfig = field(default_factory=LoanGuardConfig)
     futures: FuturesConfig = field(default_factory=FuturesConfig)
+    mtf: MultiTimeframeConfig = field(default_factory=MultiTimeframeConfig)
+    horizon_risk: HorizonRiskConfig = field(default_factory=HorizonRiskConfig)
 
     # 向後相容屬性
     @property
@@ -181,6 +218,8 @@ class Settings:
             strategies_config=cls._load_strategies_config(cfg.get("strategies", [])),
             loan_guard=cls._load_loan_guard(cfg.get("loan_guard", {})),
             futures=cls._load_futures(cfg.get("futures", {})),
+            mtf=cls._load_mtf(cfg.get("mtf", {})),
+            horizon_risk=cls._load_horizon_risk(cfg.get("horizon_risk", {})),
         )
 
     @classmethod
@@ -205,6 +244,8 @@ class Settings:
         strategies_config = cls._load_strategies_config(cfg.get("strategies", []))
         loan_guard = cls._load_loan_guard(cfg.get("loan_guard", {}))
         futures = cls._load_futures(cfg.get("futures", {}))
+        mtf = cls._load_mtf(cfg.get("mtf", {}))
+        horizon_risk = cls._load_horizon_risk(cfg.get("horizon_risk", {}))
 
         return cls(
             exchange=exchange,
@@ -217,6 +258,8 @@ class Settings:
             strategies_config=strategies_config,
             loan_guard=loan_guard,
             futures=futures,
+            mtf=mtf,
+            horizon_risk=horizon_risk,
         )
 
     @staticmethod
@@ -384,4 +427,44 @@ class Settings:
             atr=atr,
             strategies=cfg.get("strategies", []),
             min_confidence=cfg.get("min_confidence", 0.3),
+        )
+
+    @staticmethod
+    def _load_mtf(cfg: dict) -> "MultiTimeframeConfig":
+        if not cfg:
+            return MultiTimeframeConfig()
+        tfs = cfg.get("timeframes", ["1d", "4h", "1h", "15m"])
+        for tf in tfs:
+            if tf not in VALID_TIMEFRAMES:
+                raise ValueError(f"MTF 不支援的時間框架: {tf}")
+        return MultiTimeframeConfig(
+            enabled=cfg.get("enabled", True),
+            timeframes=tuple(tfs),
+            candle_limit=cfg.get("candle_limit", 50),
+            cache_ttl_seconds=cfg.get("cache_ttl_seconds", 300),
+        )
+
+    @staticmethod
+    def _load_horizon_risk(cfg: dict) -> "HorizonRiskConfig":
+        if not cfg:
+            return HorizonRiskConfig()
+        return HorizonRiskConfig(
+            short_sl_multiplier=cfg.get("short_sl_multiplier", 1.0),
+            short_tp_multiplier=cfg.get("short_tp_multiplier", 2.0),
+            short_sl_pct=cfg.get("short_sl_pct", 0.02),
+            short_tp_pct=cfg.get("short_tp_pct", 0.04),
+            short_size_factor=cfg.get("short_size_factor", 1.2),
+            short_min_rr=cfg.get("short_min_rr", 1.5),
+            medium_sl_multiplier=cfg.get("medium_sl_multiplier", 1.5),
+            medium_tp_multiplier=cfg.get("medium_tp_multiplier", 3.0),
+            medium_sl_pct=cfg.get("medium_sl_pct", 0.03),
+            medium_tp_pct=cfg.get("medium_tp_pct", 0.06),
+            medium_size_factor=cfg.get("medium_size_factor", 1.0),
+            medium_min_rr=cfg.get("medium_min_rr", 2.0),
+            long_sl_multiplier=cfg.get("long_sl_multiplier", 2.5),
+            long_tp_multiplier=cfg.get("long_tp_multiplier", 5.0),
+            long_sl_pct=cfg.get("long_sl_pct", 0.05),
+            long_tp_pct=cfg.get("long_tp_pct", 0.15),
+            long_size_factor=cfg.get("long_size_factor", 0.6),
+            long_min_rr=cfg.get("long_min_rr", 2.5),
         )

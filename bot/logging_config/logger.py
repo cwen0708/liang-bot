@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -48,8 +49,11 @@ def setup_logging(level: str = "INFO", file_enabled: bool = True, log_dir: str =
         log_path = PROJECT_ROOT / log_dir
         log_path.mkdir(parents=True, exist_ok=True)
 
-        file_handler = logging.FileHandler(
-            log_path / "bot.log", encoding="utf-8"
+        file_handler = RotatingFileHandler(
+            log_path / "bot.log",
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding="utf-8",
         )
         file_handler.setFormatter(
             logging.Formatter(

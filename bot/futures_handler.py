@@ -181,29 +181,27 @@ class FuturesHandler:
             return
 
         # ── 4. 預計算合約風控指標 ──
-        non_hold = [v for v in verdicts if v.signal != Signal.HOLD]
-        if not non_hold:
-            return
-
         risk_metrics = None
-        primary_signal = non_hold[0].signal
-        if primary_signal in (Signal.BUY, Signal.SHORT):
-            side = "long" if primary_signal == Signal.BUY else "short"
-            try:
-                balance = self._exchange.get_futures_balance()
-                available = balance["available_balance"]
-                margin_ratio = self._exchange.get_margin_ratio()
-                risk_metrics = self._risk.pre_calculate_metrics(
-                    signal=primary_signal,
-                    symbol=symbol,
-                    side=side,
-                    price=current_price,
-                    available_margin=available,
-                    margin_ratio=margin_ratio,
-                    ohlcv=finest_df,
-                )
-            except Exception as e:
-                logger.warning("%s[合約] 預計算風控指標失敗: %s", _L2, e)
+        non_hold = [v for v in verdicts if v.signal != Signal.HOLD]
+        if non_hold:
+            primary_signal = non_hold[0].signal
+            if primary_signal in (Signal.BUY, Signal.SHORT):
+                side = "long" if primary_signal == Signal.BUY else "short"
+                try:
+                    balance = self._exchange.get_futures_balance()
+                    available = balance["available_balance"]
+                    margin_ratio = self._exchange.get_margin_ratio()
+                    risk_metrics = self._risk.pre_calculate_metrics(
+                        signal=primary_signal,
+                        symbol=symbol,
+                        side=side,
+                        price=current_price,
+                        available_margin=available,
+                        margin_ratio=margin_ratio,
+                        ohlcv=finest_df,
+                    )
+                except Exception as e:
+                    logger.warning("%s[合約] 預計算風控指標失敗: %s", _L2, e)
 
         # ── 5. 多時間框架摘要（直接用已抓取的 K 線）──
         from bot.app import build_mtf_summary
@@ -227,6 +225,7 @@ class FuturesHandler:
         horizon = decision_result.horizon
 
         if final_signal == Signal.HOLD:
+            logger.info("%s[合約] → HOLD（不動作）", _L2)
             return
 
         min_conf = fc.min_confidence

@@ -33,11 +33,12 @@ def _parse_ai_json(response: str) -> dict | None:
 class LoanGuardian:
     """借貸再平衡守衛。
 
-    4 層 LTV 判定：
-    - >= danger_ltv → _loan_protect()（買入 + 質押）
-    - >= target_ltv → 警告
-    - <= low_ltv   → _loan_take_profit()（減質押 + 賣出）
-    - 中間         → 安全
+    5 層 LTV 判定：
+    - >= danger_ltv           → _loan_protect()（買入 + 質押，目標回到 target_ltv）
+    - >= danger_ltv - 5%      → 警告（接近危險）
+    - <= low_ltv              → _loan_take_profit()（減質押 + 賣出，目標回到 target_ltv）
+    - <= low_ltv + 5%         → 提醒（接近低閾值）
+    - 中間                    → 安全
     """
 
     def __init__(
@@ -92,13 +93,16 @@ class LoanGuardian:
                 "action_taken": "none",
             })
 
+            warn_high = lg.danger_ltv - 0.05
+            warn_low = lg.low_ltv + 0.05
+
             if ltv >= lg.danger_ltv:
                 logger.warning(
                     "%s[借款] %s LTV=%.1f%% 超過 %.0f%%！啟動保護流程",
                     _L1, label, ltv * 100, lg.danger_ltv * 100,
                 )
                 self._loan_protect(o, lh_row_id)
-            elif ltv >= lg.target_ltv:
+            elif ltv >= warn_high:
                 logger.warning(
                     "%s[借款] %s LTV=%.1f%% 接近危險閾值 %.0f%%",
                     _L1, label, ltv * 100, lg.danger_ltv * 100,
@@ -109,6 +113,11 @@ class LoanGuardian:
                     _L1, label, ltv * 100, lg.low_ltv * 100,
                 )
                 self._loan_take_profit(o, lh_row_id)
+            elif ltv <= warn_low:
+                logger.info(
+                    "%s[借款] %s LTV=%.1f%% 接近低閾值 %.0f%%",
+                    _L1, label, ltv * 100, lg.low_ltv * 100,
+                )
             else:
                 logger.info("%s[借款] %s LTV=%.1f%% 安全", _L1, label, ltv * 100)
 

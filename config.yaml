@@ -100,6 +100,32 @@ strategies:
   - name: "macd_momentum"
     timeframe: "1d"
     params: { fast_period: 12, slow_period: 26, signal_period: 9 }
+  # ── VWAP Reversion ──
+  - name: "vwap_reversion"
+    timeframe: "15m"
+    params: { period: 20, band_mult: 1.0 }
+  - name: "vwap_reversion"
+    timeframe: "1h"
+    params: { period: 20, band_mult: 1.0 }
+  - name: "vwap_reversion"
+    timeframe: "4h"
+    params: { period: 20, band_mult: 1.0 }
+  - name: "vwap_reversion"
+    timeframe: "1d"
+    params: { period: 20, band_mult: 1.0 }
+  # ── EMA Ribbon ──
+  - name: "ema_ribbon"
+    timeframe: "15m"
+    params: { periods: [8, 13, 21, 34] }
+  - name: "ema_ribbon"
+    timeframe: "1h"
+    params: { periods: [8, 13, 21, 34] }
+  - name: "ema_ribbon"
+    timeframe: "4h"
+    params: { periods: [8, 13, 21, 34] }
+  - name: "ema_ribbon"
+    timeframe: "1d"
+    params: { periods: [8, 13, 21, 34] }
   # ── Order Flow（無 K 線時段）──
   - name: "tia_orderflow"
     params: { signal_threshold: 0.5 }

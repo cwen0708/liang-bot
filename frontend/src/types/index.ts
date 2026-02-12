@@ -19,6 +19,7 @@ export interface StrategyVerdict {
   cycle_id: string
   market_type: 'spot' | 'futures'
   timeframe: string
+  mode: 'paper' | 'live'
   created_at: string
 }
 
@@ -31,6 +32,9 @@ export interface LLMDecision {
   model: string
   cycle_id: string
   market_type: 'spot' | 'futures'
+  executed: boolean
+  reject_reason?: string
+  mode: 'paper' | 'live'
   created_at: string
 }
 
@@ -78,6 +82,7 @@ export interface FuturesFunding {
   funding_rate: number
   funding_fee: number
   position_size: number
+  mode: 'paper' | 'live'
   created_at: string
 }
 
@@ -88,6 +93,7 @@ export interface FuturesMargin {
   total_unrealized_pnl: number
   total_margin_balance: number
   margin_ratio: number
+  mode: 'paper' | 'live'
   created_at: string
 }
 
@@ -99,6 +105,7 @@ export interface LoanHealth {
   total_debt: number
   collateral_amount: number
   action_taken: string
+  mode: 'paper' | 'live'
   created_at: string
 }
 
@@ -126,6 +133,7 @@ export interface MarketSnapshot {
   id: number
   symbol: string
   price: number
+  mode: 'paper' | 'live'
   created_at: string
 }
 
@@ -136,6 +144,7 @@ export interface BotStatus {
   config_ver: number
   pairs: string[]
   uptime_sec: number
+  mode: 'paper' | 'live'
   updated_at: string
 }
 
@@ -145,5 +154,6 @@ export interface AccountBalance {
   free: number
   usdt_value: number
   snapshot_id: string
+  mode: 'paper' | 'live'
   created_at: string
 }

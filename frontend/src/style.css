@@ -149,22 +149,28 @@ nav::-webkit-scrollbar {
 }
 
 /* Minimal scrollbar: thin thumb only, no track/arrows */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+*::-webkit-scrollbar {
+  width: 6px !important;
+  height: 6px !important;
 }
-::-webkit-scrollbar-track {
-  background: transparent;
+*::-webkit-scrollbar-track {
+  background: transparent !important;
 }
-::-webkit-scrollbar-thumb {
-  background: var(--color-border);
-  border-radius: 3px;
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border) !important;
+  border-radius: 3px !important;
 }
-::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-muted);
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted) !important;
 }
-::-webkit-scrollbar-button {
-  display: none;
+*::-webkit-scrollbar-button {
+  display: none !important;
+  flex-direction: column !important;
+  height: 0 !important;
+  width: 0 !important;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent !important;
 }
 
 /* Hide lightweight-charts TradingView logo */
@@ -172,8 +178,10 @@ nav::-webkit-scrollbar {
   display: none !important;
 }
 
-/* Firefox */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: var(--color-border) transparent;
+/* Firefox: 使用標準屬性（不支援 webkit 偽元素） */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
 }

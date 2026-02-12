@@ -23,13 +23,17 @@ class FuturesOrderExecutor:
     def __init__(
         self, exchange: BaseFuturesExchange,
         mode: TradingMode = TradingMode.PAPER,
+        is_testnet: bool = False,
     ) -> None:
         self._exchange = exchange
         self._mode = mode
+        self._is_testnet = is_testnet
+        # paper + testnet → 走真實 API（testnet 環境）
+        self._use_testnet_live = (mode == TradingMode.PAPER and is_testnet)
 
     @property
     def is_live(self) -> bool:
-        return self._mode == TradingMode.LIVE
+        return self._mode == TradingMode.LIVE or self._use_testnet_live
 
     def execute(
         self, signal: Signal, symbol: str,
@@ -52,10 +56,12 @@ class FuturesOrderExecutor:
             )
             return None
 
-        if self._mode == TradingMode.PAPER:
+        if self._use_testnet_live:
+            return self._live_execute(side, symbol, quantity, reduce_only, label="Testnet合約")
+        elif self._mode == TradingMode.PAPER:
             return self._paper_execute(side, symbol, quantity, reduce_only)
         else:
-            return self._live_execute(side, symbol, quantity, reduce_only)
+            return self._live_execute(side, symbol, quantity, reduce_only, label="實盤合約")
 
     def place_sl_tp(
         self, symbol: str, quantity: float, position_side: str,
@@ -65,7 +71,7 @@ class FuturesOrderExecutor:
         # 平倉方向：多倉用 sell，空倉用 buy
         close_side = "sell" if position_side == "long" else "buy"
 
-        if self._mode == TradingMode.PAPER:
+        if self._mode == TradingMode.PAPER and not self._use_testnet_live:
             logger.info(
                 "[模擬] 合約掛 SL/TP: %s %s TP=%.2f SL=%.2f",
                 symbol, position_side, take_profit_price, stop_loss_price,
@@ -75,7 +81,7 @@ class FuturesOrderExecutor:
                 "sl_order_id": None,
             }
 
-        # Live mode
+        # Live / Testnet mode
         tp_id, sl_id = None, None
         try:
             tp_order = self._exchange.place_take_profit_market(
@@ -106,7 +112,7 @@ class FuturesOrderExecutor:
         sl_order_id: str | None,
     ) -> None:
         """取消掛單中的 SL/TP 單。"""
-        if self._mode == TradingMode.PAPER:
+        if self._mode == TradingMode.PAPER and not self._use_testnet_live:
             return
 
         for order_id in [tp_order_id, sl_order_id]:
@@ -145,16 +151,16 @@ class FuturesOrderExecutor:
 
     def _live_execute(
         self, side: str, symbol: str, quantity: float,
-        reduce_only: bool,
+        reduce_only: bool, label: str = "實盤合約",
     ) -> dict | None:
-        """實盤合約交易。"""
+        """實盤 / Testnet 合約交易。"""
         ro_label = " (reduce_only)" if reduce_only else ""
-        logger.info("[實盤合約] 下單: %s %s %.8f%s", side.upper(), symbol, quantity, ro_label)
+        logger.info("[%s] 下單: %s %s %.8f%s", label, side.upper(), symbol, quantity, ro_label)
         order = self._exchange.place_market_order(
             symbol, side, quantity, reduce_only=reduce_only,
         )
         logger.info(
-            "[實盤合約] 成交: ID=%s, 成交量=%.8f, 均價=%.2f",
-            order["id"], order["filled"], order.get("price", 0),
+            "[%s] 成交: ID=%s, 成交量=%.8f, 均價=%.2f",
+            label, order["id"], order["filled"], order.get("price", 0),
         )
         return order

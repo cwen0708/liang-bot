@@ -91,7 +91,7 @@ class LoanGuardian:
                 "total_debt": debt,
                 "collateral_amount": collateral_amt,
                 "action_taken": "none",
-            })
+            }, mode="live")
 
             warn_high = lg.danger_ltv - 0.05
             warn_low = lg.low_ltv + 0.05

@@ -158,7 +158,7 @@ class SpotHandler:
         finest_df = tf_dataframes[finest_tf]
         current_price = float(finest_df["close"].iloc[-1])
         logger.info("%s[現貨] %s 現價: %.2f USDT", _L1, symbol, current_price)
-        self._db.insert_market_snapshot(symbol, current_price)
+        self._db.insert_market_snapshot(symbol, current_price, mode=self._settings.spot.mode.value)
 
         # ── 2. 停損停利 ──
         if self._executor.is_live and self._risk.has_exchange_sl_tp(symbol):
@@ -196,6 +196,7 @@ class SpotHandler:
                     symbol, strategy.name, verdict.signal.value,
                     verdict.confidence, verdict.reasoning, cycle_id,
                     timeframe=verdict.timeframe,
+                    mode=self._settings.spot.mode.value,
                 )
                 abbr = strategy.name[:3]
                 tf_label = verdict.timeframe or "of"
@@ -243,6 +244,7 @@ class SpotHandler:
             risk_metrics=risk_metrics,
             mtf_summary=mtf_summary,
             portfolio=portfolio,
+            mode=self._settings.spot.mode.value,
         )
 
         final_signal = decision_result.signal

@@ -11,7 +11,7 @@ const { rows: recentDecisions } = useRealtimeTable<LLMDecision>('llm_decisions',
 
 const drawerDecision = ref<LLMDecision | null>(null)
 const ATH_CACHE_KEY = 'ath_prices'
-const ATH_TTL = 24 * 3600 * 1000 // 24h
+const ATH_TTL = 12 * 3600 * 1000 // 12h cache — 每天最多刷新 2 次
 
 function loadATHCache(): Record<string, number> {
   try {
@@ -33,6 +33,17 @@ function stripLD(coin: string) {
   return coin.startsWith('LD') ? coin.slice(2) : coin
 }
 
+/** 只允許設定檔交易對的幣種 */
+function configCoins(): Set<string> {
+  const coins = new Set<string>()
+  for (const pair of bot.spotPairs) {
+    const base = pair.split('/')[0]
+    if (base && base !== 'USDT') coins.add(base)
+  }
+  return coins
+}
+
+let athFetched = false
 async function fetchATH(coin: string) {
   const real = stripLD(coin)
   if (athPrices.value[real]) return
@@ -46,13 +57,18 @@ async function fetchATH(coin: string) {
   } catch { /* ignore */ }
 }
 
-watch(() => bot.loans, (loans) => {
-  for (const l of loans) fetchATH(l.collateral_coin)
-}, { immediate: true })
+/** 只對設定檔幣種抓 ATH，且整個 session 只跑一輪 */
+function fetchATHForConfigPairs() {
+  if (athFetched) return
+  const allowed = configCoins()
+  if (!allowed.size) return
+  athFetched = true
+  for (const coin of allowed) fetchATH(coin)
+}
 
-watch(() => bot.balances, (balances) => {
-  for (const b of balances) if (b.currency !== 'USDT') fetchATH(b.currency)
-}, { immediate: true })
+watch(() => bot.spotPairs, () => fetchATHForConfigPairs(), { immediate: true })
+watch(() => bot.loans, () => fetchATHForConfigPairs(), { immediate: true })
+watch(() => bot.balances, () => fetchATHForConfigPairs(), { immediate: true })
 
 function formatTime(ts: string) {
   return new Date(ts).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false })

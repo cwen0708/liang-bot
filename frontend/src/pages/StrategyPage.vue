@@ -35,7 +35,11 @@ onMounted(() => {
 })
 
 const filteredDecisions = computed(() => {
-  return decisions.value.filter(d => (d.market_type ?? 'spot') === marketTab.value && daysAgo(d.created_at) <= 3)
+  return decisions.value.filter(d =>
+    (d.market_type ?? 'spot') === marketTab.value
+    && (d.mode ?? 'live') === bot.globalMode
+    && daysAgo(d.created_at) <= 3,
+  )
 })
 
 
@@ -60,7 +64,16 @@ function getGroupedDecisions(symbol: string): { action: string; label: string; c
   }))
 }
 
-const allStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'macd_momentum', 'tia_orderflow']
+const allStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'macd_momentum', 'vwap_reversion', 'ema_ribbon', 'tia_orderflow']
+const strategyLabel: Record<string, string> = {
+  sma_crossover: 'SMA 交叉',
+  rsi_oversold: 'RSI 超買賣',
+  bollinger_breakout: '布林突破',
+  macd_momentum: 'MACD 動能',
+  vwap_reversion: 'VWAP 回歸',
+  ema_ribbon: 'EMA 絲帶',
+  tia_orderflow: '訂單流',
+}
 
 type VerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
 
@@ -208,12 +221,9 @@ const drawerDecision = ref<LLMDecision | null>(null)
         >
           <!-- Column header -->
           <div class="px-3 pt-3 pb-2 shrink-0">
-            <div class="flex items-center justify-between mb-1">
+            <div class="flex items-center justify-between">
               <span class="font-bold text-sm text-(--color-text-primary)">{{ sym.replace('/USDT', '') }}</span>
-              <span class="text-xs text-(--color-text-muted) tabular-nums">{{ filteredDecisions.filter(d => d.symbol === sym).length }}</span>
-            </div>
-            <div class="text-xs text-(--color-text-muted) tabular-nums">
-              ${{ bot.latestPrices[sym]?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '-' }}
+              <span class="text-xs text-(--color-text-muted) tabular-nums">${{ bot.latestPrices[sym]?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '-' }}</span>
             </div>
           </div>
 
@@ -224,7 +234,7 @@ const drawerDecision = ref<LLMDecision | null>(null)
               <div
                 v-for="d in group.cards"
                 :key="d.id"
-                class="kanban-card bg-(--color-bg-card) border border-(--color-border) rounded-lg p-2.5 min-h-[218px] cursor-pointer hover:border-(--color-accent)/50 transition-colors"
+                class="kanban-card bg-(--color-bg-card) border border-(--color-border) rounded-lg p-2.5 min-h-[240px] cursor-pointer hover:border-(--color-accent)/50 transition-colors"
                 :style="cardStyle(d)"
                 @click="drawerDecision = d"
               >
@@ -233,6 +243,7 @@ const drawerDecision = ref<LLMDecision | null>(null)
                   <div class="flex items-center gap-1.5">
                     <div class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: isRecent(d.created_at) ? 'var(--color-warning)' : actionDotColor(d.action) }"></div>
                     <span class="text-xs font-bold" :class="isRecent(d.created_at) ? 'text-(--color-warning)' : actionBadgeClass(d.action)">{{ signalLabel(d.action) }}</span>
+                    <span v-if="d.executed === false" class="text-[9px] px-1 py-px rounded bg-(--color-warning-subtle) text-(--color-warning) font-medium">攔截</span>
                   </div>
                   <span class="text-[11px] text-(--color-text-muted)">{{ timeAgo(d.created_at) }}</span>
                 </div>
@@ -250,7 +261,7 @@ const drawerDecision = ref<LLMDecision | null>(null)
                     :style="slot.verdict ? verdictBgStyle(slot.verdict.signal, slot.verdict.confidence) : { background: 'var(--color-bg-secondary)' }"
                   >
                     <div class="flex items-center gap-1 min-w-0">
-                      <span class="text-[8px] text-(--color-text-muted) truncate">{{ slot.strategy }}</span>
+                      <span class="text-[8px] text-(--color-text-muted) truncate">{{ strategyLabel[slot.strategy] || slot.strategy }}</span>
                       <span v-if="slot.verdict?.timeframe" class="text-[8px] text-(--color-text-muted) shrink-0">{{ slot.verdict.timeframe }}</span>
                     </div>
                     <span v-if="slot.verdict" class="text-[8px] font-bold shrink-0" :class="signalBadgeClass(slot.verdict.signal)">{{ (slot.verdict.confidence * 100).toFixed(0) }}%</span>
@@ -262,7 +273,7 @@ const drawerDecision = ref<LLMDecision | null>(null)
               <!-- Ghost placeholder when this action has no card -->
               <div
                 v-if="!group.cards.length"
-                class="border border-dashed rounded-lg p-2.5 min-h-[218px] flex items-center"
+                class="border border-dashed rounded-lg p-2.5 min-h-[240px] flex items-center"
                 :style="{ borderColor: `color-mix(in srgb, ${actionDotColor(group.action)} 30%, transparent)` }"
               >
                 <div class="flex items-center gap-1.5">

@@ -18,6 +18,12 @@ class ExchangeConfig:
     api_key: str
     api_secret: str
     testnet: bool = True
+    # 現貨 testnet 專用 key（testnet.binance.vision）
+    testnet_api_key: str = ""
+    testnet_api_secret: str = ""
+    # 合約 testnet 專用 key（testnet.binancefuture.com，與現貨獨立）
+    futures_api_key: str = ""
+    futures_api_secret: str = ""
 
 
 @dataclass(frozen=True)
@@ -263,9 +269,11 @@ class Settings:
 
     @staticmethod
     def _load_exchange() -> ExchangeConfig:
+        testnet = os.getenv("BINANCE_TESTNET", "true").lower() in ("true", "1", "yes")
+
+        # 現貨永遠用生產 key（餘額、借貸等必須是真實數據）
         api_key = os.getenv("BINANCE_API_KEY", "")
         api_secret = os.getenv("BINANCE_API_SECRET", "")
-        testnet = os.getenv("BINANCE_TESTNET", "true").lower() in ("true", "1", "yes")
 
         if not api_key or not api_secret:
             raise ValueError(
@@ -273,7 +281,23 @@ class Settings:
                 "請參考 .env.example。"
             )
 
-        return ExchangeConfig(api_key=api_key, api_secret=api_secret, testnet=testnet)
+        # Testnet key（現貨 testnet 用於現貨 paper+testnet 下單）
+        testnet_api_key = ""
+        testnet_api_secret = ""
+        # 合約 testnet 專用 key（現貨/合約 testnet 是獨立系統）
+        futures_api_key = ""
+        futures_api_secret = ""
+        if testnet:
+            testnet_api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
+            testnet_api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+            futures_api_key = os.getenv("BINANCE_TESTNET_FUTURES_API_KEY", "")
+            futures_api_secret = os.getenv("BINANCE_TESTNET_FUTURES_API_SECRET", "")
+
+        return ExchangeConfig(
+            api_key=api_key, api_secret=api_secret, testnet=testnet,
+            testnet_api_key=testnet_api_key, testnet_api_secret=testnet_api_secret,
+            futures_api_key=futures_api_key, futures_api_secret=futures_api_secret,
+        )
 
     @staticmethod
     def _load_spot(cfg: dict) -> SpotConfig:

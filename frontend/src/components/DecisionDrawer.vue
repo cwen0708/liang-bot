@@ -15,7 +15,16 @@ const supabase = useSupabase()
 const verdicts = ref<StrategyVerdict[]>([])
 const loading = ref(false)
 
-const allStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'macd_momentum', 'tia_orderflow']
+const allStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'macd_momentum', 'vwap_reversion', 'ema_ribbon', 'tia_orderflow']
+const strategyLabel: Record<string, string> = {
+  sma_crossover: 'SMA 交叉',
+  rsi_oversold: 'RSI 超買賣',
+  bollinger_breakout: '布林突破',
+  macd_momentum: 'MACD 動能',
+  vwap_reversion: 'VWAP 回歸',
+  ema_ribbon: 'EMA 絲帶',
+  tia_orderflow: '訂單流',
+}
 
 type VerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
 
@@ -108,6 +117,15 @@ function verdictBgStyle(signal: string, confidence: number): Record<string, stri
               <span class="px-1.5 py-0.5 rounded text-[11px] font-medium bg-(--color-bg-secondary)">{{ (decision.market_type ?? 'spot') === 'futures' ? '合約' : '現貨' }}</span>
             </div>
 
+            <!-- Rejected banner -->
+            <div v-if="decision.executed === false" class="flex items-start gap-2 rounded-lg px-3 py-2.5 bg-(--color-warning-subtle) border border-(--color-warning)/20">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-warning)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 mt-0.5"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+              <div>
+                <div class="text-xs font-bold text-(--color-warning)">風控攔截 — 未執行</div>
+                <div v-if="decision.reject_reason" class="text-xs text-(--color-text-secondary) mt-0.5">{{ decision.reject_reason }}</div>
+              </div>
+            </div>
+
             <!-- Full reasoning -->
             <div class="text-sm text-(--color-text-primary) leading-relaxed whitespace-pre-wrap">{{ decision.reasoning.replace(/。/g, '。\n\n') }}</div>
 
@@ -122,7 +140,7 @@ function verdictBgStyle(signal: string, confidence: number): Record<string, stri
               >
                 <div class="flex items-center justify-between mb-1">
                   <div class="flex items-center gap-1.5">
-                    <span class="text-sm font-medium text-(--color-text-primary)">{{ slot.strategy }}</span>
+                    <span class="text-sm font-medium text-(--color-text-primary)">{{ strategyLabel[slot.strategy] || slot.strategy }}</span>
                     <span v-if="slot.verdict?.timeframe" class="text-xs text-(--color-text-muted) opacity-60">{{ slot.verdict.timeframe }}</span>
                   </div>
                   <div v-if="slot.verdict" class="flex items-center gap-2">

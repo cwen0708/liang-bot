@@ -25,6 +25,8 @@ liang-bot.web.app              kkukdzyyaqhfckvdhkfp                      ccxt
 - `exchange/` — 交易所抽象層（BaseExchange → BinanceClient，ccxt 封裝）
 - `strategy/` — 策略引擎（BaseStrategy 繼承）
   - `sma_crossover.py`, `rsi_oversold.py`, `bollinger_breakout.py`, `macd_momentum.py` — OHLCV 策略
+  - `vwap_reversion.py` — VWAP 均值回歸策略（price vs VWAP ±1σ band）
+  - `ema_ribbon.py` — EMA 絲帶趨勢策略（EMA 8/13/21/34 排列判定）
   - `tia_orderflow.py` — Order Flow 策略（權重 50%）
   - `router.py` — 策略路由
   - `signals.py` — Signal enum (BUY/SELL/HOLD)
@@ -62,9 +64,11 @@ liang-bot.web.app              kkukdzyyaqhfckvdhkfp                      ccxt
 - `stores/bot.ts` — Pinia store（status, positions, latestPrices, balances, totalUsdt）
 
 ## Supabase
-- Project: `kkukdzyyaqhfckvdhkfp`
+- Organization: `Yooliang` (`vrxxpbhnqyqkvpnfzwit`)
+- Project: `InCount` (`kkukdzyyaqhfckvdhkfp`)
 - Migrations: `supabase/migrations/`
 - CLI: `npx supabase db push` 推送 migration 到遠端
+- MCP: 需認證到 Yooliang 帳號才能透過 Supabase MCP 操作
 
 ### Tables
 | 資料表 | 寫入者 | 用途 |
@@ -120,6 +124,8 @@ pytest tests/
 - API 金鑰只在 `.env` 中，絕對不 hardcode（BINANCE_API_KEY, BINANCE_API_SECRET, SUPABASE_URL, SUPABASE_SERVICE_KEY）
 - 前端環境變數在 `frontend/.env`（VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY）
 - 新策略繼承 `bot/strategy/base.py:BaseStrategy`
+- 每個 OHLCV 策略跑 4 個時段（15m, 1h, 4h, 1d），前端顯示最高信心度的時段
+- 策略清單需同步更新：`config.yaml`、`app.py` / `app_futures.py` 的 `OHLCV_STRATEGY_REGISTRY`、Supabase `bot_config`、前端 `allStrategies` 陣列
 - 配置使用 frozen dataclass，載入後不可變
 - 所有交易所 API 呼叫都有 retry 裝飾器
 - 日誌使用 `get_logger(__name__)` 取得

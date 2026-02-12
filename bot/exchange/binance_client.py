@@ -21,21 +21,31 @@ logger = get_logger("exchange.binance")
 class BinanceClient(BaseExchange):
     """Binance 現貨交易客戶端。"""
 
-    def __init__(self, config: ExchangeConfig) -> None:
+    def __init__(self, config: ExchangeConfig, *, force_production: bool = False) -> None:
+        # force_production: 無視 testnet 設定，強制使用生產 key
+        if not force_production and config.testnet and config.testnet_api_key:
+            api_key = config.testnet_api_key
+            api_secret = config.testnet_api_secret
+            use_sandbox = True
+            env_label = "Testnet"
+        else:
+            api_key = config.api_key
+            api_secret = config.api_secret
+            use_sandbox = False
+            env_label = "生產環境"
+
         options = {
-            "apiKey": config.api_key,
-            "secret": config.api_secret,
+            "apiKey": api_key,
+            "secret": api_secret,
             "enableRateLimit": True,
             "options": {"defaultType": "spot"},
         }
-
-        if config.testnet:
+        if use_sandbox:
             options["sandbox"] = True
-            logger.info("使用幣安測試網 (Testnet)")
 
         self._exchange = ccxt.binance(options)
         self._exchange.load_markets()
-        logger.info("Binance 客戶端初始化完成，載入 %d 個交易對", len(self._exchange.markets))
+        logger.info("Binance 現貨客戶端初始化完成（%s），載入 %d 個交易對", env_label, len(self._exchange.markets))
 
     @retry(max_retries=3, delay=1.0)
     def get_ticker(self, symbol: str) -> dict:

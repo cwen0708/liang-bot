@@ -82,7 +82,8 @@ class SupabaseWriter:
                        confidence: float, reasoning: str = "",
                        cycle_id: str = "",
                        market_type: str = "spot",
-                       timeframe: str = "") -> None:
+                       timeframe: str = "",
+                       mode: str = "live") -> None:
         if not self._enabled:
             return
         try:
@@ -95,6 +96,7 @@ class SupabaseWriter:
                 "cycle_id": cycle_id,
                 "market_type": market_type,
                 "timeframe": timeframe,
+                "mode": mode,
             }).execute()
         except Exception as e:
             logger.debug("寫入 strategy_verdicts 失敗: %s", e)
@@ -104,11 +106,14 @@ class SupabaseWriter:
     def insert_llm_decision(self, symbol: str, action: str, confidence: float,
                             reasoning: str = "", model: str = "",
                             cycle_id: str = "",
-                            market_type: str = "spot") -> None:
+                            market_type: str = "spot",
+                            executed: bool = True,
+                            reject_reason: str = "",
+                            mode: str = "live") -> None:
         if not self._enabled:
             return
         try:
-            self._client.table("llm_decisions").insert({
+            row = {
                 "symbol": symbol,
                 "action": action,
                 "confidence": confidence,
@@ -116,7 +121,12 @@ class SupabaseWriter:
                 "model": model,
                 "cycle_id": cycle_id,
                 "market_type": market_type,
-            }).execute()
+                "executed": executed,
+                "mode": mode,
+            }
+            if reject_reason:
+                row["reject_reason"] = reject_reason
+            self._client.table("llm_decisions").insert(row).execute()
         except Exception as e:
             logger.debug("寫入 llm_decisions 失敗: %s", e)
 
@@ -211,7 +221,7 @@ class SupabaseWriter:
 
     # ─── Loan Health ───
 
-    def insert_loan_health(self, loan_data: dict) -> int | None:
+    def insert_loan_health(self, loan_data: dict, mode: str = "live") -> int | None:
         """寫入 loan health 快照，返回 row id 供後續更新 action_taken。"""
         if not self._enabled:
             return None
@@ -223,6 +233,7 @@ class SupabaseWriter:
                 "total_debt": loan_data.get("total_debt", 0),
                 "collateral_amount": loan_data.get("collateral_amount", 0),
                 "action_taken": loan_data.get("action_taken", "none"),
+                "mode": mode,
             }).execute()
             if resp.data:
                 return resp.data[0].get("id")
@@ -324,13 +335,15 @@ class SupabaseWriter:
 
     # ─── Market Snapshots ───
 
-    def insert_market_snapshot(self, symbol: str, price: float) -> None:
+    def insert_market_snapshot(self, symbol: str, price: float,
+                              mode: str = "live") -> None:
         if not self._enabled:
             return
         try:
             self._client.table("market_snapshots").insert({
                 "symbol": symbol,
                 "price": price,
+                "mode": mode,
             }).execute()
         except Exception as e:
             logger.debug("寫入 market_snapshots 失敗: %s", e)
@@ -339,7 +352,8 @@ class SupabaseWriter:
 
     def insert_balances(self, balances: dict[str, float],
                         usdt_values: dict[str, float | None],
-                        snapshot_id: str) -> None:
+                        snapshot_id: str,
+                        mode: str = "live") -> None:
         """批次寫入帳戶餘額快照。"""
         if not self._enabled or not balances:
             return
@@ -351,6 +365,7 @@ class SupabaseWriter:
                 "free": free,
                 "usdt_value": uv if uv is not None else 0,
                 "snapshot_id": snapshot_id,
+                "mode": mode,
             })
         try:
             self._client.table("account_balances").insert(rows).execute()
@@ -379,7 +394,8 @@ class SupabaseWriter:
 
     def update_bot_status(self, cycle_num: int, status: str = "running",
                           config_ver: int = 0, pairs: list[str] | None = None,
-                          uptime_sec: int = 0) -> None:
+                          uptime_sec: int = 0,
+                          mode: str = "live") -> None:
         if not self._enabled:
             return
         try:
@@ -389,6 +405,7 @@ class SupabaseWriter:
                 "config_ver": config_ver,
                 "pairs": pairs or [],
                 "uptime_sec": uptime_sec,
+                "mode": mode,
             }).execute()
         except Exception as e:
             logger.debug("寫入 bot_status 失敗: %s", e)
@@ -396,7 +413,8 @@ class SupabaseWriter:
     # ─── Futures Funding ───
 
     def insert_futures_funding(self, symbol: str, funding_rate: float,
-                               funding_fee: float, position_size: float) -> None:
+                               funding_fee: float, position_size: float,
+                               mode: str = "live") -> None:
         if not self._enabled:
             return
         try:
@@ -405,6 +423,7 @@ class SupabaseWriter:
                 "funding_rate": funding_rate,
                 "funding_fee": funding_fee,
                 "position_size": position_size,
+                "mode": mode,
             }).execute()
         except Exception as e:
             logger.debug("寫入 futures_funding 失敗: %s", e)
@@ -415,7 +434,8 @@ class SupabaseWriter:
                               available_balance: float,
                               unrealized_pnl: float,
                               margin_balance: float,
-                              margin_ratio: float) -> None:
+                              margin_ratio: float,
+                              mode: str = "live") -> None:
         if not self._enabled:
             return
         try:
@@ -425,6 +445,7 @@ class SupabaseWriter:
                 "total_unrealized_pnl": unrealized_pnl,
                 "total_margin_balance": margin_balance,
                 "margin_ratio": margin_ratio,
+                "mode": mode,
             }).execute()
         except Exception as e:
             logger.debug("寫入 futures_margin 失敗: %s", e)

@@ -12,13 +12,20 @@ logger = get_logger("execution.executor")
 class OrderExecutor:
     """負責下單與回報。"""
 
-    def __init__(self, exchange: BaseExchange, mode: TradingMode = TradingMode.PAPER) -> None:
+    def __init__(
+        self, exchange: BaseExchange,
+        mode: TradingMode = TradingMode.PAPER,
+        is_testnet: bool = False,
+    ) -> None:
         self._exchange = exchange
         self._mode = mode
+        self._is_testnet = is_testnet
+        # paper + testnet → 走真實 API（testnet 環境）
+        self._use_testnet_live = (mode == TradingMode.PAPER and is_testnet)
 
     @property
     def is_live(self) -> bool:
-        return self._mode == TradingMode.LIVE
+        return self._mode == TradingMode.LIVE or self._use_testnet_live
 
     def execute(
         self, signal: Signal, symbol: str, risk_output: RiskOutput
@@ -40,10 +47,12 @@ class OrderExecutor:
             )
             return None
 
-        if self._mode == TradingMode.PAPER:
+        if self._use_testnet_live:
+            return self._live_execute(side, symbol, quantity, label="Testnet")
+        elif self._mode == TradingMode.PAPER:
             return self._paper_execute(side, symbol, quantity)
         else:
-            return self._live_execute(side, symbol, quantity)
+            return self._live_execute(side, symbol, quantity, label="實盤")
 
     def place_sl_tp(
         self,
@@ -59,7 +68,7 @@ class OrderExecutor:
             OCO 訂單資訊 dict（含 tp_order_id, sl_order_id），
             paper 模式回傳模擬資訊，失敗回傳 None。
         """
-        if self._mode == TradingMode.PAPER:
+        if self._mode == TradingMode.PAPER and not self._use_testnet_live:
             logger.info(
                 "[模擬] 掛 SL/TP: %s TP=%.2f SL=%.2f",
                 symbol, take_profit_price, stop_loss_price,
@@ -85,7 +94,7 @@ class OrderExecutor:
 
     def cancel_sl_tp(self, symbol: str, tp_order_id: str | None, sl_order_id: str | None) -> None:
         """取消掛單中的 SL/TP 單（手動賣出前呼叫）。"""
-        if self._mode == TradingMode.PAPER:
+        if self._mode == TradingMode.PAPER and not self._use_testnet_live:
             return
 
         for order_id in [tp_order_id, sl_order_id]:
@@ -118,12 +127,12 @@ class OrderExecutor:
         )
         return order
 
-    def _live_execute(self, side: str, symbol: str, quantity: float) -> dict | None:
-        """實盤交易。"""
-        logger.info("[實盤] 下單: %s %s %.8f", side.upper(), symbol, quantity)
+    def _live_execute(self, side: str, symbol: str, quantity: float, label: str = "實盤") -> dict | None:
+        """實盤 / Testnet 交易。"""
+        logger.info("[%s] 下單: %s %s %.8f", label, side.upper(), symbol, quantity)
         order = self._exchange.place_market_order(symbol, side, quantity)
         logger.info(
-            "[實盤] 成交: ID=%s, 成交量=%.8f, 均價=%.2f",
-            order["id"], order["filled"], order.get("price", 0),
+            "[%s] 成交: ID=%s, 成交量=%.8f, 均價=%.2f",
+            label, order["id"], order["filled"], order.get("price", 0),
         )
         return order

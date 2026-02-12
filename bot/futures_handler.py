@@ -167,6 +167,7 @@ class FuturesHandler:
                     verdict.confidence, verdict.reasoning, cycle_id,
                     market_type="futures",
                     timeframe=verdict.timeframe,
+                    mode=self._settings.futures.mode.value,
                 )
                 abbr = strategy.name[:3]
                 tf_label = verdict.timeframe or "of"
@@ -218,6 +219,7 @@ class FuturesHandler:
             risk_metrics=risk_metrics,
             mtf_summary=mtf_summary,
             portfolio=portfolio,
+            mode=self._settings.futures.mode.value,
         )
 
         final_signal = decision_result.signal
@@ -428,6 +430,7 @@ class FuturesHandler:
             unrealized_pnl=balance["total_unrealized_pnl"],
             margin_balance=balance["total_margin_balance"],
             margin_ratio=margin_ratio,
+            mode=self._settings.futures.mode.value,
         )
 
     def _build_portfolio_state(

@@ -24,28 +24,37 @@ class FuturesBinanceClient(BaseFuturesExchange):
     def __init__(self, config: ExchangeConfig, futures_config: FuturesConfig) -> None:
         from bot.config.constants import TradingMode
 
+        # 合約 testnet 有獨立 key（與現貨 testnet 不同系統）
+        api_key = config.futures_api_key or config.api_key
+        api_secret = config.futures_api_secret or config.api_secret
+
         options = {
-            "apiKey": config.api_key,
-            "secret": config.api_secret,
+            "apiKey": api_key,
+            "secret": api_secret,
             "enableRateLimit": True,
             "options": {"defaultType": "swap"},
         }
 
         if config.testnet:
             options["sandbox"] = True
-            logger.info("使用幣安合約測試網 (Testnet)")
+            key_source = "合約專用" if config.futures_api_key else "共用"
+            logger.info("使用幣安合約測試網 (Testnet, %s key)", key_source)
 
         self._exchange = ccxt.binance(options)
         self._exchange.load_markets()
         self._default_leverage = futures_config.leverage
         self._margin_type = futures_config.margin_type
         self._is_paper = futures_config.mode == TradingMode.PAPER
+        # 純模擬 = paper 且非 testnet（testnet 需要真實 API 互動）
+        self._is_simulated = self._is_paper and not config.testnet
         self._leverage_set: set[str] = set()  # 已設定槓桿的交易對
 
+        mode_label = "testnet" if (self._is_paper and config.testnet) else (
+            "paper" if self._is_paper else "live"
+        )
         logger.info(
             "Binance 合約客戶端初始化完成，載入 %d 個交易對，預設槓桿=%dx, 模式=%s",
-            len(self._exchange.markets), self._default_leverage,
-            "paper" if self._is_paper else "live",
+            len(self._exchange.markets), self._default_leverage, mode_label,
         )
 
     def ensure_leverage_and_margin(self, symbol: str) -> None:
@@ -55,8 +64,8 @@ class FuturesBinanceClient(BaseFuturesExchange):
         """
         if symbol in self._leverage_set:
             return
-        if self._is_paper:
-            logger.debug("[Paper] 跳過設定槓桿/保證金模式: %s", symbol)
+        if self._is_simulated:
+            logger.debug("[模擬] 跳過設定槓桿/保證金模式: %s", symbol)
             self._leverage_set.add(symbol)
             return
         self.set_margin_type(symbol, self._margin_type)
@@ -108,7 +117,7 @@ class FuturesBinanceClient(BaseFuturesExchange):
 
     @retry(max_retries=3, delay=1.0, no_retry_on=(AuthenticationError,))
     def get_futures_balance(self) -> dict:
-        if self._is_paper:
+        if self._is_simulated:
             return {
                 "total_wallet_balance": self.PAPER_WALLET_BALANCE,
                 "available_balance": self.PAPER_WALLET_BALANCE,
@@ -168,6 +177,9 @@ class FuturesBinanceClient(BaseFuturesExchange):
         try:
             self._exchange.set_leverage(leverage, symbol)
             logger.info("已設定 %s 槓桿為 %dx", symbol, leverage)
+        except ccxt.NotSupported:
+            # Testnet 不支援 setLeverage，跳過
+            logger.debug("交易所不支援設定槓桿，跳過: %s", symbol)
         except ccxt.BaseError as e:
             # 有些情況下設定相同槓桿會報錯，可以忽略
             if "No need to change leverage" in str(e):
@@ -180,8 +192,10 @@ class FuturesBinanceClient(BaseFuturesExchange):
         try:
             self._exchange.set_margin_mode(margin_type, symbol)
             logger.info("已設定 %s 保證金模式為 %s", symbol, margin_type)
+        except ccxt.NotSupported:
+            # Testnet 不支援 setMarginMode，跳過（預設已是 cross）
+            logger.debug("交易所不支援設定保證金模式，跳過: %s", symbol)
         except ccxt.BaseError as e:
-            # 相同模式不需更改
             if "No need to change margin type" in str(e):
                 logger.debug("保證金模式未變更: %s", symbol)
             else:
@@ -323,7 +337,7 @@ class FuturesBinanceClient(BaseFuturesExchange):
 
     def get_margin_ratio(self) -> float:
         """帳戶保證金比率 = 維持保證金 / 保證金餘額。"""
-        if self._is_paper:
+        if self._is_simulated:
             return 0.0  # Paper 模式無真實保證金
         try:
             balance = self.get_futures_balance()

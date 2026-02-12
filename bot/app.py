@@ -42,9 +42,11 @@ from bot.strategy.base import BaseStrategy, Strategy
 from bot.strategy.router import StrategyRouter
 from bot.strategy.signals import Signal, StrategyVerdict
 from bot.strategy.bollinger_breakout import BollingerBreakoutStrategy
+from bot.strategy.ema_ribbon import EMARibbonStrategy
 from bot.strategy.macd_momentum import MACDMomentumStrategy
 from bot.strategy.rsi_oversold import RSIOversoldStrategy
 from bot.strategy.sma_crossover import SMACrossoverStrategy
+from bot.strategy.vwap_reversion import VWAPReversionStrategy
 from bot.strategy.tia_orderflow import TiaBTCOrderFlowStrategy
 
 logger = get_logger("app")
@@ -73,6 +75,8 @@ OHLCV_STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "rsi_oversold": RSIOversoldStrategy,
     "bollinger_breakout": BollingerBreakoutStrategy,
     "macd_momentum": MACDMomentumStrategy,
+    "vwap_reversion": VWAPReversionStrategy,
+    "ema_ribbon": EMARibbonStrategy,
 }
 
 
@@ -106,6 +110,7 @@ def make_llm_decision(
     mtf_summary: str,
     portfolio: PortfolioState,
     model_name: str,
+    mode: str = "live",
 ) -> DecisionResult:
     """共用 LLM 決策邏輯（現貨 + 合約）。
 
@@ -128,12 +133,6 @@ def make_llm_decision(
             risk_metrics=risk_metrics,
             mtf_summary=mtf_summary,
         )
-        db.insert_llm_decision(
-            symbol, decision.action, decision.confidence,
-            decision.reasoning, model_name,
-            cycle_id, market_type=market_type,
-        )
-
         horizon = decision.horizon if decision.horizon in ("short", "medium", "long") else "medium"
 
         logger.info(
@@ -158,12 +157,33 @@ def make_llm_decision(
                     ", ".join(s.value for s in strategy_signals),
                 )
                 llm_override = True
+                db.insert_llm_decision(
+                    symbol, decision.action, decision.confidence,
+                    decision.reasoning, model_name,
+                    cycle_id, market_type=market_type,
+                    mode=mode,
+                )
             else:
+                reject = f"無策略支持且信心不足 ({decision.confidence:.2f} < 0.7)"
                 logger.warning(
-                    "%s[LLM] 決策 %s 無策略支持且信心不足 (%.2f < 0.7) → HOLD",
-                    _L2, decision.action, decision.confidence,
+                    "%s[LLM] 決策 %s %s → HOLD",
+                    _L2, decision.action, reject,
+                )
+                db.insert_llm_decision(
+                    symbol, decision.action, decision.confidence,
+                    decision.reasoning, model_name,
+                    cycle_id, market_type=market_type,
+                    executed=False, reject_reason=reject,
+                    mode=mode,
                 )
                 return DecisionResult(signal=Signal.HOLD, confidence=0.0)
+        else:
+            db.insert_llm_decision(
+                symbol, decision.action, decision.confidence,
+                decision.reasoning, model_name,
+                cycle_id, market_type=market_type,
+                mode=mode,
+            )
 
         return DecisionResult(
             signal=llm_signal,
@@ -257,6 +277,14 @@ class TradingBot:
         logger.info("初始化交易機器人 (模式=%s)", self.settings.spot.mode)
 
         self.exchange = BinanceClient(self.settings.exchange)
+
+        # Testnet 模式下額外建立生產 client，用於真實餘額快照 + 借貸監控
+        _is_testnet = self.settings.exchange.testnet and bool(self.settings.exchange.testnet_api_key)
+        self._live_exchange: BinanceClient | None = (
+            BinanceClient(self.settings.exchange, force_production=True)
+            if _is_testnet else None
+        )
+
         self.data_fetcher = DataFetcher(self.exchange)
 
         # 統一策略清單（OHLCV + 訂單流共用）
@@ -268,7 +296,10 @@ class TradingBot:
         self._futures_strategies: list[Strategy] = self.strategies
 
         self.risk_manager = RiskManager(self.settings.spot, self.settings.horizon_risk)
-        self.executor = OrderExecutor(self.exchange, self.settings.spot.mode)
+        self.executor = OrderExecutor(
+            self.exchange, self.settings.spot.mode,
+            is_testnet=self.settings.exchange.testnet,
+        )
         self.order_manager = OrderManager()
 
         # 從 Supabase 恢復持倉到 RiskManager（重啟接續）
@@ -308,11 +339,11 @@ class TradingBot:
         if self._futures_enabled:
             self._init_futures()
 
-        # ── 借貸監控 ──
+        # ── 借貸監控（永遠使用生產 client）──
         self._loan_guardian: LoanGuardian | None = None
         if self.settings.loan_guard.enabled:
             self._loan_guardian = LoanGuardian(
-                exchange=self.exchange,
+                exchange=self._live_exchange or self.exchange,
                 db=self._db,
                 llm_client=self._llm_client,
                 config=self.settings.loan_guard,
@@ -344,7 +375,10 @@ class TradingBot:
         self._futures_exchange = FuturesBinanceClient(self.settings.exchange, fc)
         self._futures_data_fetcher = DataFetcher(self._futures_exchange)
         self._futures_risk = FuturesRiskManager(fc, self.settings.horizon_risk)
-        self._futures_executor = FuturesOrderExecutor(self._futures_exchange, fc.mode)
+        self._futures_executor = FuturesOrderExecutor(
+            self._futures_exchange, fc.mode,
+            is_testnet=self.settings.exchange.testnet,
+        )
         self._create_futures_strategies()
         self._restore_futures_positions()
 
@@ -459,6 +493,7 @@ class TradingBot:
         risk_metrics=None,
         mtf_summary: str = "",
         portfolio: PortfolioState | None = None,
+        mode: str = "live",
     ) -> DecisionResult:
         """委派到 module-level make_llm_decision。"""
         if portfolio is None:
@@ -475,6 +510,7 @@ class TradingBot:
             mtf_summary=mtf_summary,
             portfolio=portfolio,
             model_name=self.settings.llm.model,
+            mode=mode,
         )
 
     # ════════════════════════════════════════════════════════════
@@ -559,6 +595,7 @@ class TradingBot:
                     config_ver=self._config_version,
                     pairs=list(self.settings.spot.pairs),
                     uptime_sec=uptime_mid,
+                    mode=self.settings.spot.mode.value,
                 )
                 try:
                     self._loan_guardian.check()
@@ -566,23 +603,11 @@ class TradingBot:
                     logger.exception("%s借款監控發生錯誤", _L1)
 
             # 寫入帳戶餘額快照
-            try:
-                bal = self.exchange.get_balance()
-                usdt_vals: dict[str, float | None] = {}
-                for cur, amt in bal.items():
-                    base = cur[2:] if cur.startswith("LD") else cur
-                    if base in ("USDT", "USDC", "BUSD", "FDUSD"):
-                        usdt_vals[cur] = amt
-                    else:
-                        try:
-                            tk = self.exchange.get_ticker(f"{base}/USDT")
-                            usdt_vals[cur] = amt * tk["last"]
-                        except Exception:
-                            usdt_vals[cur] = None
-                snap_id = f"cycle-{cycle}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-                self._db.insert_balances(bal, usdt_vals, snap_id)
-            except Exception:
-                logger.debug("寫入帳戶餘額快照失敗", exc_info=True)
+            self._write_balance_snapshot(cycle, self.exchange, self.settings.spot.mode.value)
+
+            # Testnet 模式下額外寫一份生產帳戶餘額（mode=live）
+            if self._live_exchange:
+                self._write_balance_snapshot(cycle, self._live_exchange, "live")
 
             # 更新 Supabase 心跳 + flush 日誌
             uptime = int(time.monotonic() - self._start_time)
@@ -592,6 +617,7 @@ class TradingBot:
                 config_ver=self._config_version,
                 pairs=list(self.settings.spot.pairs),
                 uptime_sec=uptime,
+                mode=self.settings.spot.mode.value,
             )
             self._db.flush_logs()
 
@@ -600,6 +626,37 @@ class TradingBot:
                     "=============================================",
                 )
                 time.sleep(self.settings.spot.check_interval_seconds)
+
+    def _write_balance_snapshot(self, cycle: int, exchange: BinanceClient, mode: str) -> None:
+        """寫入單一 exchange 的帳戶餘額快照。"""
+        try:
+            bal_raw = exchange.get_balance()
+            # Testnet 有大量幣種，只保留設定檔幣種 + 穩定幣
+            if mode != "live" and self.settings.exchange.testnet:
+                allowed_coins = {"USDT", "USDC", "BUSD", "FDUSD"}
+                for pair in self.settings.spot.pairs:
+                    base = pair.split("/")[0] if "/" in pair else pair
+                    allowed_coins.add(base)
+                    allowed_coins.add(f"LD{base}")
+                bal = {cur: amt for cur, amt in bal_raw.items()
+                       if cur in allowed_coins or (cur.startswith("LD") and cur[2:] in allowed_coins)}
+            else:
+                bal = bal_raw
+            usdt_vals: dict[str, float | None] = {}
+            for cur, amt in bal.items():
+                base = cur[2:] if cur.startswith("LD") else cur
+                if base in ("USDT", "USDC", "BUSD", "FDUSD"):
+                    usdt_vals[cur] = amt
+                else:
+                    try:
+                        tk = exchange.get_ticker(f"{base}/USDT")
+                        usdt_vals[cur] = amt * tk["last"]
+                    except Exception:
+                        usdt_vals[cur] = None
+            snap_id = f"cycle-{cycle}-{mode}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+            self._db.insert_balances(bal, usdt_vals, snap_id, mode=mode)
+        except Exception:
+            logger.debug("寫入 %s 帳戶餘額快照失敗", mode, exc_info=True)
 
     def _reload_config_if_changed(self) -> None:
         """從 Supabase 載入最新配置（若版本已變更）。"""
@@ -630,10 +687,10 @@ class TradingBot:
             elif self._futures_handler:
                 self._futures_handler._settings = self.settings
 
-            # 借貸監控熱重載
+            # 借貸監控熱重載（永遠使用生產 client）
             if self.settings.loan_guard.enabled and not self._loan_guardian:
                 self._loan_guardian = LoanGuardian(
-                    exchange=self.exchange,
+                    exchange=self._live_exchange or self.exchange,
                     db=self._db,
                     llm_client=self._llm_client,
                     config=self.settings.loan_guard,

@@ -28,6 +28,14 @@ export const useBotStore = defineStore('bot', () => {
   function setGlobalMode(mode: 'live' | 'paper') {
     globalMode.value = mode
     localStorage.setItem(MODE_KEY, mode)
+    // 切換模式後重新抓取所有資料
+    fetchStatus()
+    fetchPositions()
+    fetchLatestPrices()
+    fetchBalances()
+    fetchLoans()
+    fetchFuturesMargin()
+    fetchFuturesFunding()
   }
 
   // Computed: 現貨 / 合約持倉分離
@@ -76,6 +84,7 @@ export const useBotStore = defineStore('bot', () => {
     const { data } = await supabase
       .from('bot_status')
       .select('*')
+      .eq('mode', globalMode.value)
       .order('updated_at', { ascending: false })
       .limit(1)
     if (data?.[0]) status.value = data[0] as BotStatus
@@ -85,6 +94,7 @@ export const useBotStore = defineStore('bot', () => {
     const { data } = await supabase
       .from('positions')
       .select('*')
+      .eq('mode', globalMode.value)
       .order('updated_at', { ascending: false })
     if (data) positions.value = data as Position[]
   }
@@ -94,6 +104,7 @@ export const useBotStore = defineStore('bot', () => {
     const { data } = await supabase
       .from('market_snapshots')
       .select('symbol, price')
+      .eq('mode', globalMode.value)
       .order('created_at', { ascending: false })
       .limit(10)
     if (data) {
@@ -110,13 +121,18 @@ export const useBotStore = defineStore('bot', () => {
   }
 
   async function fetchBalances() {
-    // Get latest snapshot_id
+    // Get latest snapshot_id for current mode
     const { data: latest } = await supabase
       .from('account_balances')
       .select('snapshot_id')
+      .eq('mode', globalMode.value)
       .order('created_at', { ascending: false })
       .limit(1)
-    if (!latest?.length) return
+    if (!latest?.length) {
+      balances.value = []
+      totalUsdt.value = 0
+      return
+    }
 
     const snapId = (latest[0] as AccountBalance).snapshot_id
     const { data } = await supabase
@@ -134,6 +150,7 @@ export const useBotStore = defineStore('bot', () => {
     const { data } = await supabase
       .from('loan_health')
       .select('*')
+      .eq('mode', globalMode.value)
       .order('created_at', { ascending: false })
       .limit(20)
     if (data) {
@@ -154,6 +171,7 @@ export const useBotStore = defineStore('bot', () => {
     const { data } = await supabase
       .from('futures_margin')
       .select('*')
+      .eq('mode', globalMode.value)
       .order('created_at', { ascending: false })
       .limit(1)
     if (data?.[0]) futuresMargin.value = data[0] as FuturesMargin
@@ -188,6 +206,7 @@ export const useBotStore = defineStore('bot', () => {
     const { data } = await supabase
       .from('futures_funding')
       .select('*')
+      .eq('mode', globalMode.value)
       .order('created_at', { ascending: false })
       .limit(20)
     if (data) futuresFunding.value = data as FuturesFunding[]
@@ -198,7 +217,10 @@ export const useBotStore = defineStore('bot', () => {
     supabase
       .channel('store:bot_status')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'bot_status' }, (p) => {
-        status.value = p.new as BotStatus
+        const row = p.new as BotStatus & { mode?: string }
+        if ((row.mode ?? 'live') === globalMode.value) {
+          status.value = row
+        }
       })
       .subscribe()
 
@@ -208,11 +230,13 @@ export const useBotStore = defineStore('bot', () => {
         if (p.eventType === 'DELETE') {
           positions.value = positions.value.filter((pos) => pos.id !== (p.old as Position).id)
         } else {
-          const idx = positions.value.findIndex((pos) => pos.id === (p.new as Position).id)
+          const row = p.new as Position
+          if ((row.mode ?? 'live') !== globalMode.value) return
+          const idx = positions.value.findIndex((pos) => pos.id === row.id)
           if (idx >= 0) {
-            positions.value[idx] = p.new as Position
+            positions.value[idx] = row
           } else {
-            positions.value.unshift(p.new as Position)
+            positions.value.unshift(row)
           }
         }
       })
@@ -221,7 +245,8 @@ export const useBotStore = defineStore('bot', () => {
     supabase
       .channel('store:market_snapshots')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'market_snapshots' }, (p) => {
-        const snap = p.new as MarketSnapshot
+        const snap = p.new as MarketSnapshot & { mode?: string }
+        if ((snap.mode ?? 'live') !== globalMode.value) return
         latestPrices.value[snap.symbol] = snap.price
         try { localStorage.setItem(PRICES_CACHE_KEY, JSON.stringify(latestPrices.value)) } catch { /* ignore */ }
       })
@@ -229,29 +254,41 @@ export const useBotStore = defineStore('bot', () => {
 
     supabase
       .channel('store:account_balances')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'account_balances' }, () => {
-        fetchBalances()
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'account_balances' }, (p) => {
+        const row = p.new as AccountBalance & { mode?: string }
+        if ((row.mode ?? 'live') === globalMode.value) {
+          fetchBalances()
+        }
       })
       .subscribe()
 
     supabase
       .channel('store:loan_health')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'loan_health' }, () => {
-        fetchLoans()
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'loan_health' }, (p) => {
+        const row = p.new as LoanHealth & { mode?: string }
+        if ((row.mode ?? 'live') === globalMode.value) {
+          fetchLoans()
+        }
       })
       .subscribe()
 
     supabase
       .channel('store:futures_margin')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'futures_margin' }, (p) => {
-        futuresMargin.value = p.new as FuturesMargin
+        const row = p.new as FuturesMargin
+        if ((row.mode ?? 'live') === globalMode.value) {
+          futuresMargin.value = row
+        }
       })
       .subscribe()
 
     supabase
       .channel('store:futures_funding')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'futures_funding' }, () => {
-        fetchFuturesFunding()
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'futures_funding' }, (p) => {
+        const row = p.new as FuturesFunding
+        if ((row.mode ?? 'live') === globalMode.value) {
+          fetchFuturesFunding()
+        }
       })
       .subscribe()
   }

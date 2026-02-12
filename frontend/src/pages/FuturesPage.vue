@@ -17,10 +17,11 @@ onMounted(async () => {
   bot.fetchFuturesMargin()
   bot.fetchFuturesFunding()
 
-  // Load margin history for chart
+  // Load margin history for chart (filtered by current mode)
   const { data } = await supabase
     .from('futures_margin')
     .select('*')
+    .eq('mode', bot.globalMode)
     .order('created_at', { ascending: false })
     .limit(100)
   if (data) marginHistory.value = (data as FuturesMargin[]).reverse()

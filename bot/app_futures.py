@@ -25,10 +25,12 @@ from bot.strategy.base import BaseStrategy, Strategy
 from bot.strategy.router import StrategyRouter
 from bot.strategy.signals import Signal, StrategyVerdict
 from bot.strategy.bollinger_breakout import BollingerBreakoutStrategy
+from bot.strategy.ema_ribbon import EMARibbonStrategy
 from bot.strategy.macd_momentum import MACDMomentumStrategy
 from bot.strategy.rsi_oversold import RSIOversoldStrategy
 from bot.strategy.sma_crossover import SMACrossoverStrategy
 from bot.strategy.tia_orderflow import TiaBTCOrderFlowStrategy
+from bot.strategy.vwap_reversion import VWAPReversionStrategy
 
 logger = get_logger("app_futures")
 
@@ -41,6 +43,8 @@ OHLCV_STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "rsi_oversold": RSIOversoldStrategy,
     "bollinger_breakout": BollingerBreakoutStrategy,
     "macd_momentum": MACDMomentumStrategy,
+    "vwap_reversion": VWAPReversionStrategy,
+    "ema_ribbon": EMARibbonStrategy,
 }
 
 
@@ -98,7 +102,10 @@ class FuturesTradingBot:
         self.risk_manager = FuturesRiskManager(fc)
 
         # 合約執行器
-        self.executor = FuturesOrderExecutor(self.exchange, fc.mode)
+        self.executor = FuturesOrderExecutor(
+            self.exchange, fc.mode,
+            is_testnet=self.settings.exchange.testnet,
+        )
 
         # 從 Supabase 恢復持倉
         self._restore_positions()
@@ -243,6 +250,7 @@ class FuturesTradingBot:
                 config_ver=self._config_version,
                 pairs=list(self.settings.futures.pairs),
                 uptime_sec=uptime,
+                mode=self.settings.futures.mode.value,
             )
             self._db.flush_logs()
 
@@ -324,7 +332,7 @@ class FuturesTradingBot:
         finest_df = tf_dataframes[finest_tf]
         current_price = float(finest_df["close"].iloc[-1])
         logger.info("%s%s 現價: %.2f USDT", _L1, symbol, current_price)
-        self._db.insert_market_snapshot(symbol, current_price)
+        self._db.insert_market_snapshot(symbol, current_price, mode=self.settings.futures.mode.value)
 
         # 2. 停損停利檢查
         for side in ("long", "short"):
@@ -366,6 +374,7 @@ class FuturesTradingBot:
                     verdict.confidence, verdict.reasoning, cycle_id,
                     market_type="futures",
                     timeframe=verdict.timeframe,
+                    mode=self.settings.futures.mode.value,
                 )
                 abbr = strategy.name[:3]
                 tf_label = verdict.timeframe or "of"
@@ -499,20 +508,51 @@ class FuturesTradingBot:
         )
 
         if decision:
-            self._db.insert_llm_decision(
-                symbol, decision.action.value if isinstance(decision.action, Signal) else str(decision.action),
-                decision.confidence, decision.reasoning,
-                self.settings.llm.model, cycle_id,
-                market_type="futures",
-            )
-
             # 將 action 字串轉為 Signal
             action_str = decision.action if isinstance(decision.action, str) else decision.action.value
             action_map = {
                 "BUY": Signal.BUY, "SELL": Signal.SELL,
                 "HOLD": Signal.HOLD, "SHORT": Signal.SHORT, "COVER": Signal.COVER,
             }
-            decision.action = action_map.get(action_str.upper(), Signal.HOLD)
+            llm_signal = action_map.get(action_str.upper(), Signal.HOLD)
+
+            # 檢查 LLM 決策是否有策略支持
+            strategy_signals = {v.signal for v in verdicts}
+            if llm_signal != Signal.HOLD and llm_signal not in strategy_signals:
+                if decision.confidence >= 0.7:
+                    logger.warning(
+                        "%s[LLM] 覆蓋策略: %s (信心 %.2f)，無策略支持 → 倉位縮半",
+                        _L2, action_str, decision.confidence,
+                    )
+                    self._db.insert_llm_decision(
+                        symbol, action_str, decision.confidence,
+                        decision.reasoning, self.settings.llm.model, cycle_id,
+                        market_type="futures",
+                        mode=self.settings.futures.mode.value,
+                    )
+                else:
+                    reject = f"無策略支持且信心不足 ({decision.confidence:.2f} < 0.7)"
+                    logger.warning(
+                        "%s[LLM] 決策 %s %s → HOLD",
+                        _L2, action_str, reject,
+                    )
+                    self._db.insert_llm_decision(
+                        symbol, action_str, decision.confidence,
+                        decision.reasoning, self.settings.llm.model, cycle_id,
+                        market_type="futures",
+                        executed=False, reject_reason=reject,
+                        mode=self.settings.futures.mode.value,
+                    )
+                    return None
+            else:
+                self._db.insert_llm_decision(
+                    symbol, action_str, decision.confidence,
+                    decision.reasoning, self.settings.llm.model, cycle_id,
+                    market_type="futures",
+                    mode=self.settings.futures.mode.value,
+                )
+
+            decision.action = llm_signal
 
         return decision
 
@@ -660,6 +700,7 @@ class FuturesTradingBot:
                 unrealized_pnl=margin["total_unrealized_pnl"],
                 margin_balance=margin["total_margin_balance"],
                 margin_ratio=ratio,
+                mode=self.settings.futures.mode.value,
             )
 
             # 保證金比率警告

@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from bot.config.constants import DataFeedType
+from bot.config.constants import DataFeedType, TF_MINUTES
 from bot.data.bar_aggregator import BarAggregator
 from bot.logging_config import get_logger
 from bot.llm.schemas import PortfolioState, PositionInfo
@@ -79,46 +79,27 @@ class SpotHandler:
         strategies: list[Strategy],
         *,
         make_decision_fn,
-        fetch_mtf_fn,
     ) -> None:
         """處理單一交易對：收集所有策略結論 → LLM/加權投票 → 執行。
 
         Args:
             make_decision_fn: 共用 LLM 決策函數 (from app.py)
-            fetch_mtf_fn: 共用 MTF 摘要函數 (from app.py)
         """
         sc = self._settings.spot
 
-        # ── 1. 抓取 K 線 ──
+        # ── 1. 按 timeframe 分組抓取 K 線 ──
         ohlcv_strategies = [s for s in strategies if s.data_feed_type == DataFeedType.OHLCV]
-        max_required = max((s.required_candles for s in ohlcv_strategies), default=50)
-        df = self._data_fetcher.fetch_ohlcv(
-            symbol,
-            timeframe=sc.timeframe,
-            limit=max(max_required + 10, 100),
+
+        # 統一排程：per-symbol slot，用最小 timeframe 的分鐘數
+        min_tf_min = min(
+            (TF_MINUTES.get(s.timeframe, 9999) for s in ohlcv_strategies),
+            default=15,
         )
+        now = datetime.now(timezone.utc)
+        minutes_since_midnight = now.hour * 60 + now.minute
+        slot = minutes_since_midnight // min_tf_min
 
-        if len(df) < max_required:
-            logger.warning("%sK 線資料不足: %d/%d", _L1, len(df), max_required)
-            return
-
-        current_price = float(df["close"].iloc[-1])
-        logger.info("%s%s 現價: %.2f USDT", _L1, symbol, current_price)
-        self._db.insert_market_snapshot(symbol, current_price)
-
-        # ── 2. 停損停利 ──
-        if self._executor.is_live and self._risk.has_exchange_sl_tp(symbol):
-            if self._sync_oco_order(symbol):
-                return
-
-        if not self._risk.has_exchange_sl_tp(symbol):
-            sl_tp_signal = self._risk.check_stop_loss_take_profit(symbol, current_price)
-            if sl_tp_signal == Signal.SELL:
-                logger.info("%s觸發停損/停利 → 執行賣出", _L2)
-                self._execute_sell(symbol, current_price)
-                return
-
-        # ── 3a. 訂單流：每輪都收集資料 ──
+        # ── 訂單流：每輪都收集資料（不受 slot 限制）──
         for strategy in strategies:
             if strategy.data_feed_type != DataFeedType.ORDER_FLOW:
                 continue
@@ -143,31 +124,70 @@ class SpotHandler:
                     if new_id > 0:
                         self._last_trade_id[symbol] = new_id
             except Exception:
-                logger.exception("%s[%s] 訂單流資料收集失敗", _L2, strategy.name)
+                logger.exception("%s[現貨][%s] 訂單流資料收集失敗", _L2, strategy.name)
 
-        # ── 3b. 收集本輪應執行的策略結論 ──
+        # Slot 防重複：同一 slot 只跑 orderflow 收集，不產 verdict
+        last = self._last_strategy_slot.get(symbol, -1)
+        if slot == last:
+            return
+        self._last_strategy_slot[symbol] = slot
+
+        # 按 timeframe 分組
+        tf_groups: dict[str, list] = {}
+        for s in ohlcv_strategies:
+            tf = s.timeframe or sc.timeframe
+            tf_groups.setdefault(tf, []).append(s)
+
+        # 抓取各 timeframe 的 K 線
+        tf_dataframes: dict[str, pd.DataFrame] = {}
+        for tf, group in tf_groups.items():
+            max_req = max(s.required_candles for s in group)
+            try:
+                tf_dataframes[tf] = self._data_fetcher.fetch_ohlcv(
+                    symbol, timeframe=tf, limit=max(max_req + 10, 100), cache_ttl=30,
+                )
+            except Exception:
+                logger.exception("%s[現貨] 抓取 %s K 線失敗", _L2, tf)
+
+        if not tf_dataframes:
+            logger.warning("%s[現貨] 無可用 K 線資料", _L1)
+            return
+
+        # 取最細粒度 timeframe 的 close 作為現價
+        finest_tf = min(tf_dataframes, key=lambda t: TF_MINUTES.get(t, 9999))
+        finest_df = tf_dataframes[finest_tf]
+        current_price = float(finest_df["close"].iloc[-1])
+        logger.info("%s[現貨] %s 現價: %.2f USDT", _L1, symbol, current_price)
+        self._db.insert_market_snapshot(symbol, current_price)
+
+        # ── 2. 停損停利 ──
+        if self._executor.is_live and self._risk.has_exchange_sl_tp(symbol):
+            if self._sync_oco_order(symbol):
+                return
+
+        if not self._risk.has_exchange_sl_tp(symbol):
+            sl_tp_signal = self._risk.check_stop_loss_take_profit(symbol, current_price)
+            if sl_tp_signal == Signal.SELL:
+                logger.info("%s[現貨] 觸發停損/停利 → 執行賣出", _L2)
+                self._execute_sell(symbol, current_price)
+                return
+
+        # ── 3. 收集策略結論 ──
         self._router.clear()
-        now = datetime.now(timezone.utc)
-        minutes_since_midnight = now.hour * 60 + now.minute
 
         for strategy in strategies:
-            if strategy.interval_n > 0:
-                slot = minutes_since_midnight // strategy.interval_n
-                last_slot = self._last_strategy_slot.get(strategy.name, -1)
-                if slot == last_slot:
-                    continue
-                self._last_strategy_slot[strategy.name] = slot
-
             verdict = None
             try:
                 if strategy.data_feed_type == DataFeedType.OHLCV:
-                    if len(df) < strategy.required_candles:
+                    tf = strategy.timeframe or sc.timeframe
+                    df = tf_dataframes.get(tf)
+                    if df is None or len(df) < strategy.required_candles:
                         continue
                     verdict = strategy.generate_verdict(df)
                 else:
                     verdict = strategy.latest_verdict(symbol)
             except Exception:
-                logger.exception("%s[%s] 策略執行失敗", _L2, strategy.name)
+                logger.exception("%s[現貨][%s] 策略執行失敗", _L2, strategy.name)
                 continue
 
             if verdict is not None:
@@ -175,16 +195,18 @@ class SpotHandler:
                 self._db.insert_verdict(
                     symbol, strategy.name, verdict.signal.value,
                     verdict.confidence, verdict.reasoning, cycle_id,
+                    timeframe=verdict.timeframe,
                 )
+                abbr = strategy.name[:3]
+                tf_label = verdict.timeframe or "of"
+                sig_str = f"{verdict.signal.value} {verdict.confidence:.0%}"
                 logger.info(
-                    "%s[%s] %s (信心 %.2f) — %s",
-                    _L2, strategy.name, verdict.signal.value,
-                    verdict.confidence, verdict.reasoning[:80],
+                    "%s[現貨][%s|%-3s] %-9s — %s",
+                    _L2, abbr, tf_label, sig_str, verdict.reasoning[:80],
                 )
 
         verdicts = self._router.get_verdicts()
         if not verdicts:
-            logger.info("%s無策略結論，跳過", _L2)
             return
 
         # ── 4. 預計算風控指標 ──
@@ -201,13 +223,14 @@ class SpotHandler:
                         symbol=symbol,
                         price=current_price,
                         balance=usdt_balance,
-                        ohlcv=df,
+                        ohlcv=finest_df,
                     )
                 except Exception as e:
-                    logger.warning("%s預計算風控指標失敗: %s", _L2, e)
+                    logger.warning("%s[現貨] 預計算風控指標失敗: %s", _L2, e)
 
-        # ── 5. 多時間框架摘要 ──
-        mtf_summary = fetch_mtf_fn(symbol)
+        # ── 5. 多時間框架摘要（直接用已抓取的 K 線）──
+        from bot.app import build_mtf_summary
+        mtf_summary = build_mtf_summary(tf_dataframes, enabled=self._settings.mtf.enabled)
 
         # ── 6. LLM 決策 ──
         portfolio = self._build_portfolio_state(symbol, current_price)
@@ -227,19 +250,19 @@ class SpotHandler:
         horizon = decision_result.horizon
 
         if final_signal == Signal.HOLD:
-            logger.info("%s→ HOLD（不動作）", _L2)
+            logger.info("%s[現貨] → HOLD（不動作）", _L2)
             return
 
         min_conf = self._settings.llm.min_confidence
         if final_confidence < min_conf:
             logger.info(
-                "%s→ %s 信心 %.2f 低於門檻 %.2f → 視為 HOLD",
+                "%s[現貨] → %s 信心 %.2f 低於門檻 %.2f → 視為 HOLD",
                 _L2, final_signal.value, final_confidence, min_conf,
             )
             return
 
         logger.info(
-            "%s→ %s (信心 %.2f, horizon=%s)",
+            "%s[現貨] → %s (信心 %.2f, horizon=%s)",
             _L2, final_signal.value, final_confidence, horizon,
         )
 
@@ -251,19 +274,19 @@ class SpotHandler:
 
                 if usdt_balance < 1.0 and balance.get("LDUSDT", 0.0) > 0:
                     logger.info(
-                        "%sUSDT 餘額不足 (%.2f)，偵測到 LDUSDT %.2f，嘗試自動贖回...",
+                        "%s[現貨] USDT 餘額不足 (%.2f)，偵測到 LDUSDT %.2f，嘗試自動贖回...",
                         _L2, usdt_balance, balance["LDUSDT"],
                     )
                     redeemed = self._exchange.redeem_all_usdt_earn()
                     if redeemed > 0:
-                        logger.info("%s已贖回 %.4f USDT，重新取得餘額", _L2, redeemed)
+                        logger.info("%s[現貨] 已贖回 %.4f USDT，重新取得餘額", _L2, redeemed)
                         time.sleep(1)
                         balance = self._exchange.get_balance()
                         usdt_balance = balance.get("USDT", 0.0)
                     else:
-                        logger.warning("%s贖回失敗或無可贖回", _L2)
+                        logger.warning("%s[現貨] 贖回失敗或無可贖回", _L2)
             except Exception as e:
-                logger.warning("%s取得餘額失敗，跳過買入: %s", _L2, e)
+                logger.warning("%s[現貨] 取得餘額失敗，跳過買入: %s", _L2, e)
                 return
 
             llm_size_pct = decision_result.llm_size_pct
@@ -274,11 +297,11 @@ class SpotHandler:
                 llm_size_pct=llm_size_pct,
             )
             if not risk_output.approved:
-                logger.info("%s風控拒絕: %s", _L2, risk_output.reason)
+                logger.info("%s[現貨] 風控拒絕: %s", _L2, risk_output.reason)
                 return
             if decision_result.llm_override and risk_output.quantity > 0:
                 risk_output.quantity /= 2
-                logger.info("%s[覆蓋] 倉位縮半: %.6f", _L2, risk_output.quantity)
+                logger.info("%s[現貨][覆蓋] 倉位縮半: %.6f", _L2, risk_output.quantity)
             self._execute_buy(symbol, current_price, risk_output, cycle_id)
 
         elif final_signal == Signal.SELL:
@@ -321,7 +344,7 @@ class SpotHandler:
                 "take_profit": risk_output.take_profit_price,
             }, mode=_mode)
             logger.info(
-                "%s✓ BUY %s @ %.2f, qty=%.8f (SL=%.2f, TP=%.2f)",
+                "%s[現貨] ✓ BUY %s @ %.2f, qty=%.8f (SL=%.2f, TP=%.2f)",
                 _L3, symbol, fill_price, risk_output.quantity,
                 risk_output.stop_loss_price, risk_output.take_profit_price,
             )
@@ -332,7 +355,7 @@ class SpotHandler:
         tp_id, sl_id = self._risk.get_sl_tp_order_ids(symbol)
         if tp_id or sl_id:
             self._executor.cancel_sl_tp(symbol, tp_id, sl_id)
-            logger.info("%s已取消 SL/TP 掛單", _L3)
+            logger.info("%s[現貨] 已取消 SL/TP 掛單", _L3)
 
         risk_output = self._risk.evaluate(Signal.SELL, symbol, price, 0)
         if not risk_output.approved:
@@ -346,7 +369,7 @@ class SpotHandler:
             _mode = self._settings.spot.mode.value
             self._db.insert_order(order, mode=_mode, cycle_id=cycle_id)
             self._db.delete_position(symbol, mode=_mode)
-            logger.info("%s✓ SELL %s @ %.2f, PnL=%.2f USDT", _L3, symbol, fill_price, pnl)
+            logger.info("%s[現貨] ✓ SELL %s @ %.2f, PnL=%.2f USDT", _L3, symbol, fill_price, pnl)
 
     def _sync_oco_order(self, symbol: str) -> bool:
         """檢查交易所 OCO 訂單是否已成交。"""
@@ -362,7 +385,7 @@ class SpotHandler:
                     pnl = self._risk.remove_position(symbol, fill_price)
                     self._order_manager.add_order(status)
                     logger.info(
-                        "%s交易所 %s 成交: %s @ %.2f, PnL=%.2f USDT",
+                        "%s[現貨] 交易所 %s 成交: %s @ %.2f, PnL=%.2f USDT",
                         _L2, label, symbol, fill_price, pnl,
                     )
                     return True

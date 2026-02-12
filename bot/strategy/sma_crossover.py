@@ -49,8 +49,8 @@ class SMACrossoverStrategy(BaseStrategy):
 
         # 黃金交叉: 快線從下方穿越慢線
         if prev["sma_fast"] <= prev["sma_slow"] and latest["sma_fast"] > latest["sma_slow"]:
-            logger.info(
-                "買入訊號 — 黃金交叉: SMA(%d)=%.2f 上穿 SMA(%d)=%.2f",
+            logger.debug(
+                "SMA 黃金交叉: SMA(%d)=%.2f 上穿 SMA(%d)=%.2f",
                 self.params["fast_period"], latest["sma_fast"],
                 self.params["slow_period"], latest["sma_slow"],
             )
@@ -58,8 +58,8 @@ class SMACrossoverStrategy(BaseStrategy):
 
         # 死亡交叉: 快線從上方穿越慢線
         if prev["sma_fast"] >= prev["sma_slow"] and latest["sma_fast"] < latest["sma_slow"]:
-            logger.info(
-                "賣出訊號 — 死亡交叉: SMA(%d)=%.2f 下穿 SMA(%d)=%.2f",
+            logger.debug(
+                "SMA 死亡交叉: SMA(%d)=%.2f 下穿 SMA(%d)=%.2f",
                 self.params["fast_period"], latest["sma_fast"],
                 self.params["slow_period"], latest["sma_slow"],
             )

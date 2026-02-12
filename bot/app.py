@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import pandas as pd
 
+from bot.config.constants import TF_MINUTES
 from bot.config.settings import Settings
 from bot.db.supabase_client import SupabaseWriter
 from bot.data.fetcher import DataFetcher
@@ -53,17 +54,9 @@ _L1 = "  "        # Level 1: symbol
 _L2 = "    "      # Level 2: strategy / action
 _L3 = "      "    # Level 3: sub-detail
 
-# Timeframe → 分鐘數對映
-_TF_MINUTES: dict[str, int] = {
-    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
-    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
-    "1d": 1440, "3d": 4320, "1w": 10080, "1M": 43200,
-}
-
-
 def _current_slot(timeframe: str, tz_offset_hours: int = 8) -> tuple[int, str]:
     """計算當前時間區間編號（從 UTC+tz_offset 00:00 起算）及區間起始時間字串。"""
-    tf_min = _TF_MINUTES.get(timeframe, 60)
+    tf_min = TF_MINUTES.get(timeframe, 60)
     now_utc = datetime.now(timezone.utc)
     local_now = now_utc + timedelta(hours=tz_offset_hours)
     minutes_since_midnight = local_now.hour * 60 + local_now.minute
@@ -184,39 +177,25 @@ def make_llm_decision(
         return DecisionResult(signal=Signal.HOLD, confidence=0.0)
 
 
-def fetch_mtf_summary(
-    data_fetcher: DataFetcher,
-    settings: Settings,
-    symbol: str,
-    market_type: str = "spot",
-    *,
-    futures_data_fetcher: DataFetcher | None = None,
+def build_mtf_summary(
+    tf_dataframes: dict[str, "pd.DataFrame"],
+    enabled: bool = True,
 ) -> str:
-    """抓取多時間框架 K 線並產生 Markdown 摘要。失敗回傳空字串。"""
-    mtf_cfg = settings.mtf
-    if not mtf_cfg.enabled:
+    """從已抓取的多時間框架 DataFrame 產生 MTF 摘要（不再另外 fetch）。
+
+    Args:
+        tf_dataframes: {timeframe: DataFrame} — 策略已抓取的 K 線。
+        enabled: MTF 開關（從 settings.mtf.enabled 傳入）。
+    """
+    if not enabled or not tf_dataframes:
         return ""
 
     try:
-        fetcher = (
-            futures_data_fetcher
-            if market_type == "futures" and futures_data_fetcher
-            else data_fetcher
-        )
-        tf_data = fetcher.fetch_multi_timeframe(
-            symbol,
-            timeframes=list(mtf_cfg.timeframes),
-            limit=mtf_cfg.candle_limit,
-            cache_ttl=mtf_cfg.cache_ttl_seconds,
-        )
-        if not tf_data:
-            return ""
-
         from bot.utils.indicators import compute_mtf_summary
         from bot.llm.summarizer import summarize_multi_timeframe
 
         summaries = []
-        for tf, df in tf_data.items():
+        for tf, df in tf_dataframes.items():
             s = compute_mtf_summary(df, tf)
             if s:
                 summaries.append(s)
@@ -403,19 +382,19 @@ class TradingBot:
     def _create_all_strategies(self) -> None:
         """根據 config 建立所有策略（OHLCV + 訂單流），統一存入 self.strategies。"""
         self.strategies.clear()
+        default_tf = self.settings.spot.timeframe
 
         for strat_cfg in self.settings.strategies_config.strategies:
             name = strat_cfg.get("name", "")
             params = strat_cfg.get("params", {})
-            interval_n = strat_cfg.get("interval_n", 60)
+            timeframe = strat_cfg.get("timeframe", "")
 
             if name in OHLCV_STRATEGY_REGISTRY:
-                params["_interval_n"] = interval_n
+                params["_timeframe"] = timeframe or default_tf
                 self.strategies.append(OHLCV_STRATEGY_REGISTRY[name](params))
-                logger.info("載入策略: %s (interval_n=%d)", name, interval_n)
+                logger.info("載入策略: %s (%s)", name, params["_timeframe"])
             elif name == "tia_orderflow":
                 of_params = {
-                    "_interval_n": interval_n,
                     "bar_interval_seconds": self.settings.orderflow.bar_interval_seconds,
                     "tick_size": self.settings.orderflow.tick_size,
                     "cvd_lookback": self.settings.orderflow.cvd_lookback,
@@ -427,14 +406,14 @@ class TradingBot:
                     **params,
                 }
                 self.strategies.append(TiaBTCOrderFlowStrategy(of_params))
-                logger.info("載入策略: %s (interval_n=%d)", name, interval_n)
+                logger.info("載入策略: %s (orderflow)", name)
             else:
                 logger.warning("未知策略: %s，跳過", name)
 
         if not self.strategies:
-            params = {**self.settings.strategy.params, "_interval_n": 60}
+            params = {**self.settings.strategy.params, "_timeframe": default_tf}
             self.strategies.append(SMACrossoverStrategy(params))
-            logger.info("使用預設 sma_crossover 策略")
+            logger.info("使用預設 sma_crossover 策略 (%s)", default_tf)
 
     def _create_futures_strategies(self) -> None:
         """建立合約專用策略清單；若 futures.strategies 為空則共用現貨策略。"""
@@ -444,15 +423,16 @@ class TradingBot:
             return
 
         self._futures_strategies = []
+        default_tf = fc.timeframe
         for strat_cfg in fc.strategies:
             name = strat_cfg.get("name", "")
             params = strat_cfg.get("params", {})
-            interval_n = strat_cfg.get("interval_n", 60)
+            timeframe = strat_cfg.get("timeframe", "")
 
             if name in OHLCV_STRATEGY_REGISTRY:
-                params["_interval_n"] = interval_n
+                params["_timeframe"] = timeframe or default_tf
                 self._futures_strategies.append(OHLCV_STRATEGY_REGISTRY[name](params))
-                logger.info("載入合約策略: %s (interval_n=%d)", name, interval_n)
+                logger.info("載入合約策略: %s (%s)", name, params["_timeframe"])
             else:
                 logger.warning("未知合約策略: %s，跳過", name)
 
@@ -463,7 +443,7 @@ class TradingBot:
     def _get_strategy_fingerprint(self) -> str:
         """取得目前策略配置的指紋（用於偵測變更）。"""
         configs = self.settings.strategies_config.strategies
-        return str(sorted((c.get("name"), c.get("interval_n"), str(c.get("params"))) for c in configs))
+        return str(sorted((c.get("name"), c.get("timeframe"), str(c.get("params"))) for c in configs))
 
     # ════════════════════════════════════════════════════════════
     # 決策委派函數（給 handler 用的 callback）
@@ -497,16 +477,6 @@ class TradingBot:
             model_name=self.settings.llm.model,
         )
 
-    def _fetch_mtf_summary(self, symbol: str, market_type: str = "spot") -> str:
-        """委派到 module-level fetch_mtf_summary。"""
-        return fetch_mtf_summary(
-            data_fetcher=self.data_fetcher,
-            settings=self.settings,
-            symbol=symbol,
-            market_type=market_type,
-            futures_data_fetcher=getattr(self, "_futures_data_fetcher", None),
-        )
-
     # ════════════════════════════════════════════════════════════
     # 主迴圈
     # ════════════════════════════════════════════════════════════
@@ -516,19 +486,27 @@ class TradingBot:
         self._running = True
         signal.signal(signal.SIGINT, self._shutdown)
 
-        all_names = [s.name for s in self.strategies]
+        all_names = [s.name[:3] for s in self.strategies]
         lg = self.settings.loan_guard
         fc = self.settings.futures
-        logger.info(
-            "啟動交易: 現貨=%s, 時間框架=%s, 策略=%s, LLM=%s, 借款監控=%s, 合約=%s",
-            self.settings.spot.pairs,
-            self.settings.spot.timeframe,
-            all_names,
-            "啟用" if self.llm_engine.enabled else "停用",
-            f"啟用 (低買>{lg.danger_ltv:.0%}, 高賣<{lg.low_ltv:.0%}, 目標={lg.target_ltv:.0%}{', 模擬' if lg.dry_run else ''})"
-            if lg.enabled else "停用",
-            f"啟用 (交易對={fc.pairs}, {fc.leverage}x, {fc.mode.value})" if fc.enabled else "停用",
-        )
+        sc = self.settings.spot
+
+        logger.info("═══ 啟動交易 ═══")
+        logger.info("  [現貨] 交易對=%s  時間框架=%s  模式=%s", sc.pairs, sc.timeframe, sc.mode.value)
+        logger.info("  [策略] %s", ", ".join(all_names))
+        logger.info("  [LLM]  %s", "啟用" if self.llm_engine.enabled else "停用")
+        if lg.enabled:
+            logger.info(
+                "  [借貸] 啟用 (低買>%s 高賣<%s 目標=%s%s)",
+                f"{lg.danger_ltv:.0%}", f"{lg.low_ltv:.0%}", f"{lg.target_ltv:.0%}",
+                ", 模擬" if lg.dry_run else "",
+            )
+        else:
+            logger.info("  [借貸] 停用")
+        if fc.enabled:
+            logger.info("  [合約] 啟用 (交易對=%s, %dx, %s)", fc.pairs, fc.leverage, fc.mode.value)
+        else:
+            logger.info("  [合約] 停用")
 
         self._start_time = time.monotonic()
         cycle = self._db.get_last_cycle_num()
@@ -552,7 +530,6 @@ class TradingBot:
                     self._spot_handler.process_symbol(
                         symbol, cycle_id, cycle, self.strategies,
                         make_decision_fn=self._make_decision,
-                        fetch_mtf_fn=self._fetch_mtf_summary,
                     )
                 except Exception:
                     logger.exception("%s處理時發生錯誤", _L1)
@@ -564,7 +541,6 @@ class TradingBot:
                         self._futures_handler.process_symbol(
                             symbol, cycle_id, cycle, self._futures_strategies,
                             make_decision_fn=self._make_decision,
-                            fetch_mtf_fn=self._fetch_mtf_summary,
                         )
                     except Exception:
                         logger.exception("%s[合約] %s 處理時發生錯誤", _L1, symbol)

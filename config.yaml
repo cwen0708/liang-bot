@@ -46,32 +46,31 @@ orderflow:
   absorption_lookback: 10
   signal_threshold: 0.5
 
-# Multi-Strategy（interval_n: 每 N 輪執行一次，1=每輪，60=每小時）
+# Multi-Strategy（每策略獨立 timeframe，統一每 15 分鐘觸發）
 strategies:
   - name: "sma_crossover"
-    interval_n: 60
+    timeframe: "1h"
     params:
       fast_period: 10
       slow_period: 30
   - name: "rsi_oversold"
-    interval_n: 60
+    timeframe: "15m"
     params:
       period: 14
       oversold: 30
       overbought: 70
   - name: "bollinger_breakout"
-    interval_n: 60
+    timeframe: "4h"
     params:
       period: 20
       std_dev: 2.0
   - name: "macd_momentum"
-    interval_n: 60
+    timeframe: "1d"
     params:
       fast_period: 12
       slow_period: 26
       signal_period: 9
   - name: "tia_orderflow"
-    interval_n: 1
     params:
       signal_threshold: 0.5
 

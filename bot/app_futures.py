@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import datetime, timezone, timedelta
 
-from bot.config.constants import DataFeedType, TradingMode
+from bot.config.constants import DataFeedType, TF_MINUTES, TradingMode
 from bot.config.settings import Settings
 from bot.data.bar_aggregator import BarAggregator
 from bot.data.fetcher import DataFetcher
@@ -35,12 +35,6 @@ logger = get_logger("app_futures")
 _L1 = "  "
 _L2 = "    "
 _L3 = "      "
-
-_TF_MINUTES: dict[str, int] = {
-    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
-    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
-    "1d": 1440, "3d": 4320, "1w": 10080, "1M": 43200,
-}
 
 OHLCV_STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "sma_crossover": SMACrossoverStrategy,
@@ -143,22 +137,20 @@ class FuturesTradingBot:
     def _create_all_strategies(self) -> None:
         """建立所有策略（與現貨共用策略配置）。"""
         self.strategies.clear()
-
-        # 合約使用獨立的策略配置（futures_strategies），若無則 fallback 到現有 strategies
+        default_tf = self.settings.futures.timeframe
         strat_list = self.settings.strategies_config.strategies
 
         for strat_cfg in strat_list:
             name = strat_cfg.get("name", "")
             params = strat_cfg.get("params", {})
-            interval_n = strat_cfg.get("interval_n", 60)
+            timeframe = strat_cfg.get("timeframe", "")
 
             if name in OHLCV_STRATEGY_REGISTRY:
-                params["_interval_n"] = interval_n
+                params["_timeframe"] = timeframe or default_tf
                 self.strategies.append(OHLCV_STRATEGY_REGISTRY[name](params))
-                logger.info("載入合約策略: %s (interval_n=%d)", name, interval_n)
+                logger.info("載入合約策略: %s (%s)", name, params["_timeframe"])
             elif name == "tia_orderflow":
                 of_params = {
-                    "_interval_n": interval_n,
                     "bar_interval_seconds": self.settings.orderflow.bar_interval_seconds,
                     "tick_size": self.settings.orderflow.tick_size,
                     "cvd_lookback": self.settings.orderflow.cvd_lookback,
@@ -170,18 +162,18 @@ class FuturesTradingBot:
                     **params,
                 }
                 self.strategies.append(TiaBTCOrderFlowStrategy(of_params))
-                logger.info("載入合約策略: %s (interval_n=%d)", name, interval_n)
+                logger.info("載入合約策略: %s (orderflow)", name)
             else:
                 logger.warning("未知策略: %s，跳過", name)
 
         if not self.strategies:
-            params = {"_interval_n": 60}
+            params = {"_timeframe": default_tf}
             self.strategies.append(SMACrossoverStrategy(params))
-            logger.info("使用預設 sma_crossover 策略")
+            logger.info("使用預設 sma_crossover 策略 (%s)", default_tf)
 
     def _get_strategy_fingerprint(self) -> str:
         configs = self.settings.strategies_config.strategies
-        return str(sorted((c.get("name"), c.get("interval_n"), str(c.get("params"))) for c in configs))
+        return str(sorted((c.get("name"), c.get("timeframe"), str(c.get("params"))) for c in configs))
 
     def run(self) -> None:
         """啟動合約交易迴圈。"""
@@ -265,43 +257,19 @@ class FuturesTradingBot:
         """處理單一合約交易對。"""
         fc = self.settings.futures
 
-        # 1. 取 K 線
+        # 1. 按 timeframe 分組抓取 K 線
         ohlcv_strategies = [s for s in self.strategies if s.data_feed_type == DataFeedType.OHLCV]
-        max_required = max((s.required_candles for s in ohlcv_strategies), default=50)
-        df = self.data_fetcher.fetch_ohlcv(
-            symbol, timeframe=fc.timeframe,
-            limit=max(max_required + 10, 100),
+
+        # 統一排程：per-symbol slot，用最小 timeframe 的分鐘數
+        min_tf_min = min(
+            (TF_MINUTES.get(s.timeframe, 9999) for s in ohlcv_strategies),
+            default=15,
         )
+        now = datetime.now(timezone.utc)
+        minutes_since_midnight = now.hour * 60 + now.minute
+        slot = minutes_since_midnight // min_tf_min
 
-        if len(df) < max_required:
-            logger.warning("%sK 線資料不足: %d/%d", _L1, len(df), max_required)
-            return
-
-        current_price = float(df["close"].iloc[-1])
-        logger.info("%s%s 現價: %.2f USDT", _L1, symbol, current_price)
-        self._db.insert_market_snapshot(symbol, current_price)
-
-        # 2. 停損停利檢查
-        for side in ("long", "short"):
-            pos = self.risk_manager.get_position(symbol, side)
-            if not pos:
-                continue
-
-            # Live 模式：檢查交易所 SL/TP 掛單
-            if self.executor.is_live and self.risk_manager.has_exchange_sl_tp(symbol, side):
-                if self._sync_sl_tp_orders(symbol, side):
-                    continue  # 掛單已成交
-
-            # Paper 模式或無掛單：輪詢價格
-            if not self.risk_manager.has_exchange_sl_tp(symbol, side):
-                sl_tp_signal = self.risk_manager.check_stop_loss_take_profit(
-                    symbol, side, current_price,
-                )
-                if sl_tp_signal in (Signal.SELL, Signal.COVER):
-                    logger.info("%s觸發%s停損/停利 → 平倉", _L2, side)
-                    self._execute_close(symbol, side, current_price, cycle_id)
-
-        # 3. 收集訂單流資料
+        # 收集訂單流（每輪）
         for strategy in self.strategies:
             if strategy.data_feed_type != DataFeedType.ORDER_FLOW:
                 continue
@@ -327,32 +295,66 @@ class FuturesTradingBot:
             except Exception:
                 logger.exception("%s[%s] 訂單流資料收集失敗", _L2, strategy.name)
 
-        # 4. 收集策略結論
+        # Slot 防重複
+        last = self._last_strategy_slot.get(symbol, -1)
+        if slot == last:
+            return
+        self._last_strategy_slot[symbol] = slot
+
+        # 按 timeframe 分組
+        tf_groups: dict[str, list] = {}
+        for s in ohlcv_strategies:
+            tf = s.timeframe or fc.timeframe
+            tf_groups.setdefault(tf, []).append(s)
+
+        tf_dataframes: dict[str, object] = {}
+        for tf, group in tf_groups.items():
+            max_req = max(s.required_candles for s in group)
+            try:
+                tf_dataframes[tf] = self.data_fetcher.fetch_ohlcv(
+                    symbol, timeframe=tf, limit=max(max_req + 10, 100), cache_ttl=30,
+                )
+            except Exception:
+                logger.exception("%s抓取 %s K 線失敗", _L2, tf)
+
+        if not tf_dataframes:
+            logger.warning("%s%s 無可用 K 線資料", _L1, symbol)
+            return
+
+        finest_tf = min(tf_dataframes, key=lambda t: TF_MINUTES.get(t, 9999))
+        finest_df = tf_dataframes[finest_tf]
+        current_price = float(finest_df["close"].iloc[-1])
+        logger.info("%s%s 現價: %.2f USDT", _L1, symbol, current_price)
+        self._db.insert_market_snapshot(symbol, current_price)
+
+        # 2. 停損停利檢查
+        for side in ("long", "short"):
+            pos = self.risk_manager.get_position(symbol, side)
+            if not pos:
+                continue
+            if self.executor.is_live and self.risk_manager.has_exchange_sl_tp(symbol, side):
+                if self._sync_sl_tp_orders(symbol, side):
+                    continue
+            if not self.risk_manager.has_exchange_sl_tp(symbol, side):
+                sl_tp_signal = self.risk_manager.check_stop_loss_take_profit(
+                    symbol, side, current_price,
+                )
+                if sl_tp_signal in (Signal.SELL, Signal.COVER):
+                    logger.info("%s觸發%s停損/停利 → 平倉", _L2, side)
+                    self._execute_close(symbol, side, current_price, cycle_id)
+
+        # 3. 收集策略結論
         self.router.clear()
-        now = datetime.now(timezone.utc)
-        minutes_since_midnight = now.hour * 60 + now.minute
 
         for strategy in self.strategies:
-            if strategy.interval_n > 0:
-                slot = minutes_since_midnight // strategy.interval_n
-                last_slot = self._last_strategy_slot.get(strategy.name, -1)
-                if slot == last_slot:
-                    continue
-                self._last_strategy_slot[strategy.name] = slot
-
             verdict = None
             try:
                 if strategy.data_feed_type == DataFeedType.OHLCV:
-                    if len(df) < strategy.required_candles:
+                    tf = strategy.timeframe or fc.timeframe
+                    df = tf_dataframes.get(tf)
+                    if df is None or len(df) < strategy.required_candles:
                         continue
-                    raw_signal = strategy.generate_signal(df)
-                    verdict = StrategyVerdict(
-                        strategy_name=strategy.name,
-                        signal=raw_signal,
-                        confidence=getattr(strategy, "last_confidence", 0.5),
-                        reasoning=getattr(strategy, "last_reasoning", ""),
-                        indicators=getattr(strategy, "last_indicators", {}),
-                    )
+                    verdict = strategy.generate_verdict(df)
                 elif strategy.data_feed_type == DataFeedType.ORDER_FLOW:
                     verdict = strategy.latest_verdict(symbol)
             except Exception:
@@ -363,13 +365,15 @@ class FuturesTradingBot:
                 self._db.insert_verdict(
                     symbol, verdict.strategy_name, verdict.signal.value,
                     verdict.confidence, verdict.reasoning, cycle_id,
+                    timeframe=verdict.timeframe,
                 )
-                if verdict.signal != Signal.HOLD:
-                    logger.info(
-                        "%s[%s] → %s (信心=%.2f)",
-                        _L2, verdict.strategy_name, verdict.signal.value,
-                        verdict.confidence,
-                    )
+                abbr = strategy.name[:3]
+                tf_label = verdict.timeframe or "of"
+                sig_str = f"{verdict.signal.value} {verdict.confidence:.0%}"
+                logger.info(
+                    "%s[%s|%-3s] %-9s — %s",
+                    _L2, abbr, tf_label, sig_str, verdict.reasoning[:80],
+                )
 
         verdicts = self.router.get_verdicts()
         if not verdicts:

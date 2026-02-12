@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from bot.config.constants import DataFeedType
+from bot.config.constants import DataFeedType, TF_MINUTES
 from bot.logging_config import get_logger
 from bot.llm.schemas import PortfolioState, PositionInfo
 from bot.strategy.signals import Signal, StrategyVerdict
@@ -69,33 +69,59 @@ class FuturesHandler:
         strategies: list[Strategy],
         *,
         make_decision_fn,
-        fetch_mtf_fn,
     ) -> None:
         """處理單一合約交易對。
 
         Args:
             make_decision_fn: 共用 LLM 決策函數 (from app.py)
-            fetch_mtf_fn: 共用 MTF 摘要函數 (from app.py)
         """
         fc = self._settings.futures
 
         # 確保槓桿和保證金模式已設定
         self._exchange.ensure_leverage_and_margin(symbol)
 
-        # ── 1. 取得 K 線 ──
+        # ── 1. 按 timeframe 分組抓取 K 線 ──
         ohlcv_strategies = [s for s in strategies if s.data_feed_type == DataFeedType.OHLCV]
-        max_required = max((s.required_candles for s in ohlcv_strategies), default=50)
-        df = self._exchange.get_ohlcv(
-            symbol,
-            timeframe=fc.timeframe,
-            limit=max(max_required + 10, 100),
-        )
 
-        if len(df) < max_required:
-            logger.warning("%s[合約] %s K 線資料不足: %d/%d", _L1, symbol, len(df), max_required)
+        # 統一排程：per-symbol slot，用最小 timeframe 的分鐘數
+        min_tf_min = min(
+            (TF_MINUTES.get(s.timeframe, 9999) for s in ohlcv_strategies),
+            default=15,
+        )
+        now = datetime.now(timezone.utc)
+        minutes_since_midnight = now.hour * 60 + now.minute
+        slot = minutes_since_midnight // min_tf_min
+
+        last = self._last_strategy_slot.get(symbol, -1)
+        if slot == last:
+            return
+        self._last_strategy_slot[symbol] = slot
+
+        # 按 timeframe 分組
+        tf_groups: dict[str, list] = {}
+        for s in ohlcv_strategies:
+            tf = s.timeframe or fc.timeframe
+            tf_groups.setdefault(tf, []).append(s)
+
+        # 抓取各 timeframe 的 K 線（改用 DataFetcher，有 TTL 快取）
+        tf_dataframes: dict[str, "pd.DataFrame"] = {}
+        for tf, group in tf_groups.items():
+            max_req = max(s.required_candles for s in group)
+            try:
+                tf_dataframes[tf] = self._data_fetcher.fetch_ohlcv(
+                    symbol, timeframe=tf, limit=max(max_req + 10, 100), cache_ttl=30,
+                )
+            except Exception:
+                logger.exception("%s[合約] 抓取 %s K 線失敗", _L2, tf)
+
+        if not tf_dataframes:
+            logger.warning("%s[合約] %s 無可用 K 線資料", _L1, symbol)
             return
 
-        current_price = float(df["close"].iloc[-1])
+        # 取最細粒度 timeframe 的 close 作為現價
+        finest_tf = min(tf_dataframes, key=lambda t: TF_MINUTES.get(t, 9999))
+        finest_df = tf_dataframes[finest_tf]
+        current_price = float(finest_df["close"].iloc[-1])
         logger.info("%s[合約] %s 現價: %.2f USDT", _L1, symbol, current_price)
 
         # ── 2. 停損停利（多倉 + 空倉都要檢查）──
@@ -119,21 +145,15 @@ class FuturesHandler:
 
         # ── 3. 收集策略結論 ──
         self._router.clear()
-        now = datetime.now(timezone.utc)
-        minutes_since_midnight = now.hour * 60 + now.minute
 
         for strategy in strategies:
             if strategy.data_feed_type != DataFeedType.OHLCV:
                 continue
-            if strategy.interval_n > 0:
-                slot = minutes_since_midnight // strategy.interval_n
-                last_slot = self._last_strategy_slot.get(strategy.name, -1)
-                if slot == last_slot:
-                    continue
-                self._last_strategy_slot[strategy.name] = slot
 
             try:
-                if len(df) < strategy.required_candles:
+                tf = strategy.timeframe or fc.timeframe
+                df = tf_dataframes.get(tf)
+                if df is None or len(df) < strategy.required_candles:
                     continue
                 verdict = strategy.generate_verdict(df)
             except Exception:
@@ -146,6 +166,14 @@ class FuturesHandler:
                     symbol, strategy.name, verdict.signal.value,
                     verdict.confidence, verdict.reasoning, cycle_id,
                     market_type="futures",
+                    timeframe=verdict.timeframe,
+                )
+                abbr = strategy.name[:3]
+                tf_label = verdict.timeframe or "of"
+                sig_str = f"{verdict.signal.value} {verdict.confidence:.0%}"
+                logger.info(
+                    "%s[合約][%s|%-3s] %-9s — %s",
+                    _L2, abbr, tf_label, sig_str, verdict.reasoning[:80],
                 )
 
         verdicts = self._router.get_verdicts()
@@ -172,13 +200,14 @@ class FuturesHandler:
                     price=current_price,
                     available_margin=available,
                     margin_ratio=margin_ratio,
-                    ohlcv=df,
+                    ohlcv=finest_df,
                 )
             except Exception as e:
                 logger.warning("%s[合約] 預計算風控指標失敗: %s", _L2, e)
 
-        # ── 5. 多時間框架摘要 ──
-        mtf_summary = fetch_mtf_fn(symbol, market_type="futures")
+        # ── 5. 多時間框架摘要（直接用已抓取的 K 線）──
+        from bot.app import build_mtf_summary
+        mtf_summary = build_mtf_summary(tf_dataframes, enabled=self._settings.mtf.enabled)
 
         # ── 6. LLM 審查 ──
         portfolio = self._build_portfolio_state(symbol, current_price)

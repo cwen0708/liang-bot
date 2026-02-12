@@ -83,7 +83,7 @@ class LLMDecisionEngine:
 
             # 4. 解析決策
             decision = self._parse_decision(response)
-            logger.info(
+            logger.debug(
                 "LLM 決策: %s (信心 %.2f) — %s",
                 decision.action, decision.confidence, decision.reasoning[:100],
             )

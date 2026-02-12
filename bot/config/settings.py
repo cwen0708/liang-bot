@@ -106,9 +106,8 @@ class AtrConfig:
 
 @dataclass(frozen=True)
 class MultiTimeframeConfig:
-    """多時間框架分析配置。"""
+    """多時間框架分析配置。timeframes 已從策略 config 自動收集，不再需要手動指定。"""
     enabled: bool = True
-    timeframes: tuple[str, ...] = ("1d", "4h", "1h", "15m")
     candle_limit: int = 50
     cache_ttl_seconds: int = 300
 
@@ -168,9 +167,9 @@ class FuturesConfig:
 
 @dataclass(frozen=True)
 class StrategiesConfig:
-    """多策略配置。每個策略可設 interval_n 控制執行頻率。"""
+    """多策略配置。每個策略可設 timeframe 指定 K 線週期。"""
     strategies: list[dict] = field(default_factory=lambda: [
-        {"name": "sma_crossover", "interval_n": 60, "params": {"fast_period": 10, "slow_period": 30}},
+        {"name": "sma_crossover", "timeframe": "1h", "params": {"fast_period": 10, "slow_period": 30}},
     ])
 
 
@@ -433,13 +432,8 @@ class Settings:
     def _load_mtf(cfg: dict) -> "MultiTimeframeConfig":
         if not cfg:
             return MultiTimeframeConfig()
-        tfs = cfg.get("timeframes", ["1d", "4h", "1h", "15m"])
-        for tf in tfs:
-            if tf not in VALID_TIMEFRAMES:
-                raise ValueError(f"MTF 不支援的時間框架: {tf}")
         return MultiTimeframeConfig(
             enabled=cfg.get("enabled", True),
-            timeframes=tuple(tfs),
             candle_limit=cfg.get("candle_limit", 50),
             cache_ttl_seconds=cfg.get("cache_ttl_seconds", 300),
         )

@@ -54,16 +54,16 @@ class MACDMomentumStrategy(BaseStrategy):
 
         # MACD 上穿信號線 → 買入
         if prev["macd"] <= prev["macd_signal"] and latest["macd"] > latest["macd_signal"]:
-            logger.info(
-                "買入訊號 — MACD 上穿信號線: MACD=%.4f Signal=%.4f",
+            logger.debug(
+                "MACD 上穿信號線: MACD=%.4f Signal=%.4f",
                 latest["macd"], latest["macd_signal"],
             )
             return Signal.BUY
 
         # MACD 下穿信號線 → 賣出
         if prev["macd"] >= prev["macd_signal"] and latest["macd"] < latest["macd_signal"]:
-            logger.info(
-                "賣出訊號 — MACD 下穿信號線: MACD=%.4f Signal=%.4f",
+            logger.debug(
+                "MACD 下穿信號線: MACD=%.4f Signal=%.4f",
                 latest["macd"], latest["macd_signal"],
             )
             return Signal.SELL
@@ -97,6 +97,7 @@ class MACDMomentumStrategy(BaseStrategy):
                 f"MACD({fast},{slow},{sig}) "
                 f"MACD={macd_val:.4f} Signal={signal_val:.4f} Hist={hist_val:.4f}"
             ),
+            timeframe=self.timeframe,
             indicators={
                 "macd": round(macd_val, 6),
                 "macd_signal": round(signal_val, 6),

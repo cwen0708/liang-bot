@@ -53,16 +53,16 @@ class BollingerBreakoutStrategy(BaseStrategy):
 
         # 從下軌下方回升突破 → 買入
         if prev["close"] < prev["bb_lower"] and latest["close"] >= latest["bb_lower"]:
-            logger.info(
-                "買入訊號 — 突破下軌: 價格 %.2f 回升至下軌 %.2f 上方",
+            logger.debug(
+                "BB 突破下軌: 價格 %.2f 回升至下軌 %.2f 上方",
                 latest["close"], latest["bb_lower"],
             )
             return Signal.BUY
 
         # 從上軌上方回落跌破 → 賣出
         if prev["close"] > prev["bb_upper"] and latest["close"] <= latest["bb_upper"]:
-            logger.info(
-                "賣出訊號 — 跌破上軌: 價格 %.2f 回落至上軌 %.2f 下方",
+            logger.debug(
+                "BB 跌破上軌: 價格 %.2f 回落至上軌 %.2f 下方",
                 latest["close"], latest["bb_upper"],
             )
             return Signal.SELL
@@ -96,6 +96,7 @@ class BollingerBreakoutStrategy(BaseStrategy):
                 f"BB({self.params.get('period', 20)},{self.params.get('std_dev', 2.0)}) "
                 f"價格={latest['close']:.2f} | 上軌={bb_upper:.2f} 中軌={bb_mid:.2f} 下軌={bb_lower:.2f} | %B={pct_b:.2f}"
             ),
+            timeframe=self.timeframe,
             indicators={
                 "bb_upper": round(bb_upper, 2),
                 "bb_mid": round(bb_mid, 2),

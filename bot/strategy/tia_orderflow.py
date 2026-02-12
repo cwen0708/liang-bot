@@ -89,10 +89,10 @@ class TiaBTCOrderFlowStrategy(OrderFlowStrategy):
                 self._indicator_engine.on_bar(bar)
                 count += 1
             if count > 0:
-                logger.info("[%s] 從快取載入 %d 根 K 線 (%s)", self.name, count, symbol)
+                logger.info("    [%s] 快取載入 %d 根 K 線", self.name[:3], count)
             return count
         except Exception as e:
-            logger.warning("[%s] 載入快取失敗: %s", self.name, e)
+            logger.warning("    [%s] 載入快取失敗: %s", self.name[:3], e)
             return 0
 
     def _save_cache(self, symbol: str) -> None:
@@ -122,6 +122,7 @@ class TiaBTCOrderFlowStrategy(OrderFlowStrategy):
                 signal=Signal.HOLD,
                 confidence=0.0,
                 reasoning=f"數據不足 ({len(self._bars)}/{self.required_bars})，等待更多 K 線",
+                timeframe=self.timeframe,
                 indicators=indicators,
                 timestamp=bar.timestamp,
             )
@@ -148,6 +149,7 @@ class TiaBTCOrderFlowStrategy(OrderFlowStrategy):
             signal=signal,
             confidence=confidence,
             reasoning=reasoning,
+            timeframe=self.timeframe,
             key_evidence=evidence,
             indicators={
                 **indicators,

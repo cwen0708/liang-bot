@@ -49,6 +49,13 @@ MIN_NOTIONAL_USDT = 10.0
 # 幣安 USDT-M 合約最低交易額
 MIN_NOTIONAL_FUTURES_USDT = 5.0
 
+# Timeframe → 分鐘數對映
+TF_MINUTES: dict[str, int] = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
+    "1d": 1440, "3d": 4320, "1w": 10080, "1M": 43200,
+}
+
 # API 重試設定
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.0

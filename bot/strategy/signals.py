@@ -36,6 +36,7 @@ class StrategyVerdict:
     signal: Signal
     confidence: float          # 0.0 ~ 1.0
     reasoning: str             # 文字說明（為什麼這樣判斷）
+    timeframe: str = ""        # 策略使用的 K 線時間框架
     key_evidence: list[str] = field(default_factory=list)
     indicators: dict = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.utcnow)

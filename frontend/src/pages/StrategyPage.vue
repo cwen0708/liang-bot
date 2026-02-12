@@ -215,7 +215,10 @@ function closeDrawer() {
                     class="flex items-center justify-between gap-1 rounded px-1.5 py-0.5"
                     :style="slot.verdict ? verdictBgStyle(slot.verdict.signal, slot.verdict.confidence) : { background: 'var(--color-bg-secondary)' }"
                   >
-                    <span class="text-[11px] text-(--color-text-muted) truncate">{{ slot.strategy }}</span>
+                    <div class="flex items-center gap-1 min-w-0">
+                      <span class="text-[11px] text-(--color-text-muted) truncate">{{ slot.strategy }}</span>
+                      <span v-if="slot.verdict?.timeframe" class="text-[10px] text-(--color-text-muted) opacity-60 shrink-0">{{ slot.verdict.timeframe }}</span>
+                    </div>
                     <span v-if="slot.verdict" class="text-[11px] font-bold shrink-0" :class="signalBadgeClass(slot.verdict.signal)">{{ signalLabel(slot.verdict.signal) }}</span>
                     <span v-else class="text-[11px] text-(--color-text-muted) opacity-30 shrink-0">-</span>
                   </div>
@@ -287,7 +290,10 @@ function closeDrawer() {
                     :style="slot.verdict ? verdictBgStyle(slot.verdict.signal, slot.verdict.confidence) : { background: 'var(--color-bg-secondary)' }"
                   >
                     <div class="flex items-center justify-between mb-1">
-                      <span class="text-sm font-medium text-(--color-text-primary)">{{ slot.strategy }}</span>
+                      <div class="flex items-center gap-1.5">
+                        <span class="text-sm font-medium text-(--color-text-primary)">{{ slot.strategy }}</span>
+                        <span v-if="slot.verdict?.timeframe" class="text-xs text-(--color-text-muted) opacity-60">{{ slot.verdict.timeframe }}</span>
+                      </div>
                       <div v-if="slot.verdict" class="flex items-center gap-2">
                         <span class="text-sm font-bold" :class="signalBadgeClass(slot.verdict.signal)">{{ signalLabel(slot.verdict.signal) }}</span>
                         <span class="text-sm text-(--color-text-muted)">{{ (slot.verdict.confidence * 100).toFixed(0) }}%</span>

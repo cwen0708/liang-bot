@@ -31,9 +31,9 @@ class Strategy(ABC):
         """策略數據來源類型。"""
 
     @property
-    def interval_n(self) -> int:
-        """每 N 分鐘執行一次（UTC 午夜起算的分鐘數取餘數）。"""
-        return self.params.get("_interval_n", 1)
+    def timeframe(self) -> str:
+        """策略的 K 線時間框架。OrderFlow 回傳空字串。"""
+        return self.params.get("_timeframe", "")
 
 
 class BaseStrategy(Strategy):
@@ -62,6 +62,7 @@ class BaseStrategy(Strategy):
             signal=signal,
             confidence=1.0 if signal != Signal.HOLD else 0.0,
             reasoning=f"{self.name} 訊號: {signal.value}",
+            timeframe=self.timeframe,
         )
 
 
@@ -134,7 +135,7 @@ class OrderFlowStrategy(Strategy):
                 new_bars.append(bar)
 
         if new_bars:
-            logger.info("    aggTrade → %d 根新訂單流 K 線", len(new_bars))
+            logger.info("    [%s] aggTrade → %d 根新 K 線", self.name[:3], len(new_bars))
 
         # 送入策略
         verdict = None

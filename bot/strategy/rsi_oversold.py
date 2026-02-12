@@ -57,16 +57,16 @@ class RSIOversoldStrategy(BaseStrategy):
 
         # 從超賣區回升 → 買入
         if prev["rsi"] < oversold and latest["rsi"] >= oversold:
-            logger.info(
-                "買入訊號 — RSI 從超賣回升: %.1f → %.1f (閾值 %d)",
+            logger.debug(
+                "RSI 從超賣回升: %.1f → %.1f (閾值 %d)",
                 prev["rsi"], latest["rsi"], oversold,
             )
             return Signal.BUY
 
         # 從超買區回落 → 賣出
         if prev["rsi"] > overbought and latest["rsi"] <= overbought:
-            logger.info(
-                "賣出訊號 — RSI 從超買回落: %.1f → %.1f (閾值 %d)",
+            logger.debug(
+                "RSI 從超買回落: %.1f → %.1f (閾值 %d)",
                 prev["rsi"], latest["rsi"], overbought,
             )
             return Signal.SELL
@@ -94,5 +94,6 @@ class RSIOversoldStrategy(BaseStrategy):
             signal=signal,
             confidence=max(0.0, confidence),
             reasoning=f"RSI({self.params.get('period', 14)})={rsi_val:.1f} | 超賣<{oversold} 超買>{overbought}",
+            timeframe=self.timeframe,
             indicators={"rsi": round(rsi_val, 2)},
         )

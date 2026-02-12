@@ -81,7 +81,8 @@ class SupabaseWriter:
     def insert_verdict(self, symbol: str, strategy: str, signal: str,
                        confidence: float, reasoning: str = "",
                        cycle_id: str = "",
-                       market_type: str = "spot") -> None:
+                       market_type: str = "spot",
+                       timeframe: str = "") -> None:
         if not self._enabled:
             return
         try:
@@ -93,6 +94,7 @@ class SupabaseWriter:
                 "reasoning": reasoning[:500],
                 "cycle_id": cycle_id,
                 "market_type": market_type,
+                "timeframe": timeframe,
             }).execute()
         except Exception as e:
             logger.debug("寫入 strategy_verdicts 失敗: %s", e)

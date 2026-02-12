@@ -18,6 +18,7 @@ export interface StrategyVerdict {
   reasoning: string
   cycle_id: string
   market_type: 'spot' | 'futures'
+  timeframe: string
   created_at: string
 }
 

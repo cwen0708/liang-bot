@@ -26,15 +26,15 @@
    - 問題：TTL 快取條目只在讀取時檢查是否過期，但從未主動清理。長時間運行的 daemon 會累積大量過期條目，導致記憶體無限增長。
    - 修復：在每次 `fetch_ohlcv()` 查詢快取前，先遍歷清理所有過期條目。
 
-2. **LLM 輸入/輸出大小無限制** (P2)
-   - 位置：`bot/llm/decision_engine.py`、`bot/llm/prompts.py`
+2. **LLM 輸入/輸出大小無限制** (P2) ✅ 已修復
+   - 位置：`bot/llm/decision_engine.py`、`bot/llm/summarizer.py`
    - 問題：策略結論和 LLM 回覆沒有長度上限。若策略產生異常大量文字，可能導致 Claude CLI 呼叫超時或費用異常。
-   - 建議：對 `build_decision_prompt()` 的輸入做字數截斷（如策略摘要最多 2000 字元），對 LLM 回覆做最大長度檢查。
+   - 修復：在 summarizer 層從源頭控制（reasoning 500 字截斷、evidence 限 5 條、指標限 8 個）+ action 白名單驗證。不做 prompt 粗暴截斷（正常 ~4k 字元，截斷反而導致 LLM 誤判）。
 
-3. **日誌中的財務資訊** (P2)
-   - 位置：`bot/app.py` 多處 `logger.info()` 呼叫
-   - 問題：日誌寫入 Supabase `bot_logs` 表，包含餘額、數量、價格等敏感資訊。雖然用 `service_role` key，但 Supabase Dashboard 可能有多人存取。
-   - 建議：將精確數量/餘額降級為 `logger.debug()`，或在 Supabase handler 中遮罩敏感欄位。
+3. **日誌中的財務資訊** (P2) ✅ 已修復
+   - 位置：`bot/logging_config/logger.py`
+   - 問題：本地日誌檔案（`data/logs/bot.log`）和 console 輸出包含精確餘額、數量等敏感資訊，可能被他人直接查看。
+   - 修復：本地日誌（console + file）透過 `_MaskingFormatter` 遮罩 qty/balance/available 精確數字；Supabase 僅限本人存取，保留完整數據供遠端除錯。
 
 ### 🟡 中風險
 
@@ -181,5 +181,5 @@
 
 | # | 問題 | 檔案 | 修復方式 |
 |---|------|------|----------|
-| P2-1 | LLM 輸入/輸出大小無限制 | `llm/decision_engine.py`、`llm/summarizer.py` | prompt 12000 字截斷、回覆 4000 字截斷、action 白名單驗證、策略 reasoning 500 字截斷 |
-| P2-2 | 日誌中的財務資訊 | `logging_config/logger.py` | SupabaseLogHandler 遮罩 qty/balance/available 精確數字，console/file 日誌不受影響 |
+| P2-1 | LLM 輸入/輸出大小無限制 | `llm/decision_engine.py`、`llm/summarizer.py` | action 白名單驗證、策略 reasoning 500 字截斷、evidence 限 5 條。移除 prompt/response 粗暴截斷（正常 ~4k 字元遠低於 LLM 上限，截斷反而導致誤判風險） |
+| P2-2 | 日誌中的財務資訊 | `logging_config/logger.py` | 本地日誌（console + file）透過 `_MaskingFormatter` 遮罩 qty/balance/available 精確數字；Supabase 保留完整數據供遠端除錯 |

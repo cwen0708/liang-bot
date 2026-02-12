@@ -18,6 +18,38 @@ if TYPE_CHECKING:
 
 _configured = False
 
+# ---------------------------------------------------------------------------
+# 敏感資料遮罩 — 本地日誌（console + file）遮罩精確財務數字
+# ---------------------------------------------------------------------------
+
+# 遮罩 qty=0.00008932 → qty=***
+_QTY_PATTERN = re.compile(r'(qty|quantity|filled|數量)[=:]\s*[\d.]+', re.IGNORECASE)
+# 遮罩精確餘額 如 "餘額 12345.67" 或 "balance=12345.67" 或 "USDT 餘額: 12345.67"
+_BALANCE_PATTERN = re.compile(
+    r'(餘額|balance|available|可用)\s*[=:]\s*[\d,.]+', re.IGNORECASE
+)
+
+
+def _mask_sensitive(message: str) -> str:
+    """遮罩日誌中的精確財務數據（qty、balance 等）。"""
+    message = _QTY_PATTERN.sub(lambda m: m.group(1) + '=***', message)
+    message = _BALANCE_PATTERN.sub(lambda m: m.group(1) + '=***', message)
+    return message
+
+
+class _MaskingFormatter(logging.Formatter):
+    """在格式化後對訊息做敏感資料遮罩。"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _mask_sensitive(super().format(record))
+
+
+class _MaskingColoredFormatter(colorlog.ColoredFormatter):
+    """彩色 + 遮罩的 Formatter（用於 console handler）。"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _mask_sensitive(super().format(record))
+
 
 def setup_logging(level: str = "INFO", file_enabled: bool = True, log_dir: str = "data/logs") -> None:
     """初始化全域日誌設定。"""
@@ -28,10 +60,10 @@ def setup_logging(level: str = "INFO", file_enabled: bool = True, log_dir: str =
     root_logger = logging.getLogger("bot")
     root_logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    # Console handler（彩色）
+    # Console handler（彩色 + 遮罩敏感資料）
     console_handler = colorlog.StreamHandler(sys.stdout)
     console_handler.setFormatter(
-        colorlog.ColoredFormatter(
+        _MaskingColoredFormatter(
             "%(log_color)s%(asctime)s [%(levelname)-8s]%(reset)s %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
             log_colors={
@@ -45,7 +77,7 @@ def setup_logging(level: str = "INFO", file_enabled: bool = True, log_dir: str =
     )
     root_logger.addHandler(console_handler)
 
-    # File handler
+    # File handler（遮罩敏感資料）
     if file_enabled:
         log_path = PROJECT_ROOT / log_dir
         log_path.mkdir(parents=True, exist_ok=True)
@@ -57,7 +89,7 @@ def setup_logging(level: str = "INFO", file_enabled: bool = True, log_dir: str =
             encoding="utf-8",
         )
         file_handler.setFormatter(
-            logging.Formatter(
+            _MaskingFormatter(
                 "%(asctime)s [%(levelname)-8s] %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
@@ -79,27 +111,14 @@ def get_logger(name: str) -> logging.Logger:
 class SupabaseLogHandler(logging.Handler):
     """將日誌透過 SupabaseWriter.insert_log 寫入 bot_logs 表。
 
-    寫入 Supabase 前會遮罩敏感財務數據（精確餘額、數量），
-    console 和檔案日誌不受影響。
+    Supabase Dashboard 僅限本人存取（service_role key），
+    保留完整財務數據方便遠端除錯。
+    本地日誌（console + file）則由 _MaskingFormatter 遮罩敏感資料。
     """
-
-    # 遮罩 qty=0.00008932 → qty=***.***
-    _QTY_PATTERN = re.compile(r'(qty|quantity|filled|數量)[=:]\s*[\d.]+', re.IGNORECASE)
-    # 遮罩精確餘額 如 "餘額 12345.67" 或 "balance=12345.67" 或 "USDT 餘額: 12345.67"
-    _BALANCE_PATTERN = re.compile(
-        r'(餘額|balance|available|可用)\s*[=:]\s*[\d,.]+', re.IGNORECASE
-    )
 
     def __init__(self, writer: SupabaseWriter, level: int = logging.INFO) -> None:
         super().__init__(level)
         self._writer = writer
-
-    @classmethod
-    def _mask_sensitive(cls, message: str) -> str:
-        """遮罩日誌中的精確財務數據。"""
-        message = cls._QTY_PATTERN.sub(lambda m: m.group(1) + '=***', message)
-        message = cls._BALANCE_PATTERN.sub(lambda m: m.group(1) + '=***', message)
-        return message
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -107,11 +126,10 @@ class SupabaseLogHandler(logging.Handler):
             module = record.name
             if module.startswith("bot."):
                 module = module[4:]
-            message = self._mask_sensitive(self.format(record))
             self._writer.insert_log(
                 level=record.levelname,
                 module=module,
-                message=message,
+                message=self.format(record),
             )
         except Exception:
             pass  # 避免日誌寫入失敗導致遞迴錯誤

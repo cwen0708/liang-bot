@@ -27,9 +27,6 @@ class LLMDecisionEngine:
     5. 若 LLM 失敗，fallback 為加權投票
     """
 
-    # 安全限制
-    MAX_PROMPT_CHARS = 12000      # prompt 最大字元數（約 3000 tokens）
-    MAX_RESPONSE_CHARS = 4000     # LLM 回覆最大字元數
     VALID_ACTIONS = {"BUY", "SELL", "HOLD", "SHORT", "COVER"}
 
     def __init__(self, config: LLMConfig) -> None:
@@ -83,24 +80,8 @@ class LLMDecisionEngine:
                 mtf_summary=mtf_summary,
             )
 
-            # 2b. 安全截斷（避免超長 prompt 導致超時或費用異常）
-            if len(prompt) > self.MAX_PROMPT_CHARS:
-                logger.warning(
-                    "Prompt 過長 (%d 字元)，截斷至 %d",
-                    len(prompt), self.MAX_PROMPT_CHARS,
-                )
-                prompt = prompt[:self.MAX_PROMPT_CHARS] + "\n\n[...截斷...]\n請根據以上資訊做出決策。"
-
             # 3. 呼叫 LLM
             response = await self._client.call(prompt)
-
-            # 3b. 回覆長度檢查
-            if len(response) > self.MAX_RESPONSE_CHARS:
-                logger.warning(
-                    "LLM 回覆過長 (%d 字元)，截斷至 %d",
-                    len(response), self.MAX_RESPONSE_CHARS,
-                )
-                response = response[:self.MAX_RESPONSE_CHARS]
 
             # 4. 解析決策
             decision = self._parse_decision(response)

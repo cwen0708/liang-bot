@@ -40,6 +40,7 @@ class SpotConfig:
     max_daily_loss_pct: float = 0.05
     atr: "AtrConfig" = field(default_factory=lambda: AtrConfig(enabled=False))
     min_risk_reward: float = 1.5
+    parallel: bool = False  # 啟用 symbol 並行處理
 
 
 @dataclass(frozen=True)
@@ -341,6 +342,7 @@ class Settings:
             max_daily_loss_pct=src.get("max_daily_loss_pct", 0.05),
             atr=atr,
             min_risk_reward=src.get("min_risk_reward", 1.5),
+            parallel=src.get("parallel", False),
         )
 
     @staticmethod

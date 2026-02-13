@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import signal
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING
@@ -24,8 +26,8 @@ from bot.config.constants import TF_MINUTES
 from bot.config.settings import Settings
 from bot.db.supabase_client import SupabaseWriter
 from bot.data.fetcher import DataFetcher
-from bot.exchange.binance_client import BinanceClient
-from bot.exchange.futures_client import FuturesBinanceClient
+from bot.exchange.binance_native_client import BinanceClient
+from bot.exchange.futures_native_client import FuturesBinanceClient
 from bot.execution.executor import OrderExecutor
 from bot.execution.futures_executor import FuturesOrderExecutor
 from bot.execution.order_manager import OrderManager
@@ -352,6 +354,15 @@ class TradingBot:
         self._running = False
         self._start_time: float = 0.0
 
+        # ── 並行處理 ──
+        self._parallel = self.settings.spot.parallel
+        max_workers = min(len(self.settings.spot.pairs) + len(self.settings.futures.pairs if self._futures_enabled else []), 8)
+        self._thread_pool = ThreadPoolExecutor(
+            max_workers=max(max_workers, 1),
+            thread_name_prefix="symbol",
+        )
+        self._llm_semaphore = threading.Semaphore(3)  # LLM 並行上限
+
     def _restore_positions(self) -> None:
         """從 Supabase positions 表恢復持倉到 RiskManager（重啟接續）。"""
         mode = self.settings.spot.mode.value
@@ -495,23 +506,27 @@ class TradingBot:
         portfolio: PortfolioState | None = None,
         mode: str = "live",
     ) -> DecisionResult:
-        """委派到 module-level make_llm_decision。"""
+        """委派到 module-level make_llm_decision（含 LLM 並行限制）。"""
         if portfolio is None:
             portfolio = PortfolioState()
-        return make_llm_decision(
-            llm_engine=self.llm_engine,
-            db=self._db,
-            verdicts=verdicts,
-            symbol=symbol,
-            current_price=current_price,
-            cycle_id=cycle_id,
-            market_type=market_type,
-            risk_metrics=risk_metrics,
-            mtf_summary=mtf_summary,
-            portfolio=portfolio,
-            model_name=self.settings.llm.model,
-            mode=mode,
-        )
+        self._llm_semaphore.acquire()
+        try:
+            return make_llm_decision(
+                llm_engine=self.llm_engine,
+                db=self._db,
+                verdicts=verdicts,
+                symbol=symbol,
+                current_price=current_price,
+                cycle_id=cycle_id,
+                market_type=market_type,
+                risk_metrics=risk_metrics,
+                mtf_summary=mtf_summary,
+                portfolio=portfolio,
+                model_name=self.settings.llm.model,
+                mode=mode,
+            )
+        finally:
+            self._llm_semaphore.release()
 
     # ════════════════════════════════════════════════════════════
     # 主迴圈
@@ -559,32 +574,11 @@ class TradingBot:
             # 從 Supabase 載入最新配置（若版本已變更）
             self._reload_config_if_changed()
 
-            # ── 現貨交易對處理 ──
-            for symbol in self.settings.spot.pairs:
-                try:
-                    self._spot_handler.process_symbol(
-                        symbol, cycle_id, cycle, self.strategies,
-                        make_decision_fn=self._make_decision,
-                    )
-                except Exception:
-                    logger.exception("%s處理時發生錯誤", _L1)
-
-            # ── 合約交易對處理 ──
-            if self._futures_enabled and self._futures_handler:
-                for symbol in self.settings.futures.pairs:
-                    try:
-                        self._futures_handler.process_symbol(
-                            symbol, cycle_id, cycle, self._futures_strategies,
-                            make_decision_fn=self._make_decision,
-                        )
-                    except Exception:
-                        logger.exception("%s[合約] %s 處理時發生錯誤", _L1, symbol)
-
-                # 記錄合約保證金快照
-                try:
-                    self._futures_handler.record_margin()
-                except Exception:
-                    logger.debug("合約保證金快照失敗", exc_info=True)
+            # ── 交易對處理（支援並行）──
+            if self._parallel:
+                self._process_symbols_parallel(cycle_id, cycle)
+            else:
+                self._process_symbols_sequential(cycle_id, cycle)
 
             # ── 借款 LTV 監控 ──
             if self._loan_guardian:
@@ -716,6 +710,84 @@ class TradingBot:
         except Exception as e:
             logger.error("套用 Supabase 配置失敗: %s（保留舊配置）", e)
 
+    def _process_symbols_sequential(self, cycle_id: str, cycle: int) -> None:
+        """序列式處理所有交易對（原有行為）。"""
+        for symbol in self.settings.spot.pairs:
+            try:
+                self._spot_handler.process_symbol(
+                    symbol, cycle_id, cycle, self.strategies,
+                    make_decision_fn=self._make_decision,
+                )
+            except Exception:
+                logger.exception("%s處理時發生錯誤", _L1)
+
+        if self._futures_enabled and self._futures_handler:
+            for symbol in self.settings.futures.pairs:
+                try:
+                    self._futures_handler.process_symbol(
+                        symbol, cycle_id, cycle, self._futures_strategies,
+                        make_decision_fn=self._make_decision,
+                    )
+                except Exception:
+                    logger.exception("%s[合約] %s 處理時發生錯誤", _L1, symbol)
+
+            try:
+                self._futures_handler.record_margin()
+            except Exception:
+                logger.debug("合約保證金快照失敗", exc_info=True)
+
+    def _process_symbols_parallel(self, cycle_id: str, cycle: int) -> None:
+        """並行處理所有交易對（ThreadPoolExecutor）。"""
+        futures = []
+
+        for symbol in self.settings.spot.pairs:
+            fut = self._thread_pool.submit(
+                self._safe_process_spot, symbol, cycle_id, cycle,
+            )
+            futures.append(("spot", symbol, fut))
+
+        if self._futures_enabled and self._futures_handler:
+            for symbol in self.settings.futures.pairs:
+                fut = self._thread_pool.submit(
+                    self._safe_process_futures, symbol, cycle_id, cycle,
+                )
+                futures.append(("futures", symbol, fut))
+
+        # 等待所有完成
+        for market, symbol, fut in futures:
+            try:
+                fut.result(timeout=300)
+            except Exception:
+                logger.exception("%s[%s] %s 並行處理異常", _L1, market, symbol)
+
+        # 合約保證金快照（需在所有合約 symbol 處理完後）
+        if self._futures_enabled and self._futures_handler:
+            try:
+                self._futures_handler.record_margin()
+            except Exception:
+                logger.debug("合約保證金快照失敗", exc_info=True)
+
+    def _safe_process_spot(self, symbol: str, cycle_id: str, cycle: int) -> None:
+        """Thread-safe wrapper for spot symbol processing."""
+        try:
+            self._spot_handler.process_symbol(
+                symbol, cycle_id, cycle, self.strategies,
+                make_decision_fn=self._make_decision,
+            )
+        except Exception:
+            logger.exception("%s[現貨] %s 處理時發生錯誤", _L1, symbol)
+
+    def _safe_process_futures(self, symbol: str, cycle_id: str, cycle: int) -> None:
+        """Thread-safe wrapper for futures symbol processing."""
+        try:
+            self._futures_handler.process_symbol(
+                symbol, cycle_id, cycle, self._futures_strategies,
+                make_decision_fn=self._make_decision,
+            )
+        except Exception:
+            logger.exception("%s[合約] %s 處理時發生錯誤", _L1, symbol)
+
     def _shutdown(self, signum, frame) -> None:
         logger.info("收到中止訊號，正在關閉...")
         self._running = False
+        self._thread_pool.shutdown(wait=False)

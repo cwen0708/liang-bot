@@ -16,6 +16,7 @@ from bot.config.constants import DataFeedType, TF_MINUTES
 from bot.data.bar_aggregator import BarAggregator
 from bot.logging_config import get_logger
 from bot.llm.schemas import PortfolioState, PositionInfo
+from bot.strategy.router import StrategyRouter
 from bot.strategy.signals import Signal, StrategyVerdict
 
 if TYPE_CHECKING:
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     from bot.config.settings import Settings
     from bot.data.fetcher import DataFetcher
     from bot.db.supabase_client import SupabaseWriter
-    from bot.exchange.binance_client import BinanceClient
+    from bot.exchange.binance_native_client import BinanceClient
     from bot.execution.executor import OrderExecutor
     from bot.execution.order_manager import OrderManager
     from bot.llm.decision_engine import LLMDecisionEngine
@@ -172,8 +173,8 @@ class SpotHandler:
                 self._execute_sell(symbol, current_price)
                 return
 
-        # ── 3. 收集策略結論 ──
-        self._router.clear()
+        # ── 3. 收集策略結論（per-call router，thread-safe）──
+        router = StrategyRouter()
 
         for strategy in strategies:
             verdict = None
@@ -191,7 +192,7 @@ class SpotHandler:
                 continue
 
             if verdict is not None:
-                self._router.collect(verdict)
+                router.collect(verdict)
                 self._db.insert_verdict(
                     symbol, strategy.name, verdict.signal.value,
                     verdict.confidence, verdict.reasoning, cycle_id,
@@ -206,7 +207,7 @@ class SpotHandler:
                     _L2, abbr, tf_label, sig_str, verdict.reasoning[:80],
                 )
 
-        verdicts = self._router.get_verdicts()
+        verdicts = router.get_verdicts()
         if not verdicts:
             return
 
@@ -407,7 +408,12 @@ class SpotHandler:
             usdt_balance = 0.0
 
         positions = []
-        for sym, pos_data in self._risk._open_positions.items():
+        with self._risk._lock:
+            open_pos = dict(self._risk._open_positions)
+            daily_pnl = self._risk._daily_pnl
+            pos_count = len(self._risk._open_positions)
+
+        for sym, pos_data in open_pos.items():
             entry = pos_data["entry_price"]
             qty = pos_data["quantity"]
             price = current_price if sym == symbol else entry
@@ -428,7 +434,7 @@ class SpotHandler:
             available_balance=usdt_balance,
             positions=positions,
             max_positions=sc.max_open_positions,
-            current_position_count=self._risk.open_position_count,
-            daily_realized_pnl=self._risk._daily_pnl,
-            daily_risk_remaining=usdt_balance * sc.max_daily_loss_pct + self._risk._daily_pnl,
+            current_position_count=pos_count,
+            daily_realized_pnl=daily_pnl,
+            daily_risk_remaining=usdt_balance * sc.max_daily_loss_pct + daily_pnl,
         )

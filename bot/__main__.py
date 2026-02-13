@@ -133,7 +133,7 @@ def cmd_run_futures(args) -> None:
 
 def cmd_futures_balance() -> None:
     from bot.config.settings import Settings
-    from bot.exchange.futures_client import FuturesBinanceClient
+    from bot.exchange.futures_native_client import FuturesBinanceClient
 
     settings = Settings.load()
     client = FuturesBinanceClient(settings.exchange, settings.futures)
@@ -191,7 +191,7 @@ def _cmd_backtest_ohlcv(args, strategy_name: str) -> None:
     from bot.backtest.simulator import BacktestSimulator
     from bot.config.settings import Settings
     from bot.data.fetcher import DataFetcher
-    from bot.exchange.binance_client import BinanceClient
+    from bot.exchange.binance_native_client import BinanceClient
     from bot.logging_config.logger import setup_logging
     from bot.strategy.sma_crossover import SMACrossoverStrategy
 
@@ -262,7 +262,7 @@ def _cmd_backtest_orderflow(args) -> None:
 
 def cmd_balance() -> None:
     from bot.config.settings import Settings
-    from bot.exchange.binance_client import BinanceClient
+    from bot.exchange.binance_native_client import BinanceClient
     from bot.logging_config.logger import setup_logging
 
     settings = Settings.load()
@@ -349,7 +349,7 @@ def _format_loan_orders(orders: list[dict]) -> None:
 
 def cmd_loan() -> None:
     from bot.config.settings import Settings
-    from bot.exchange.binance_client import BinanceClient
+    from bot.exchange.binance_native_client import BinanceClient
     from bot.logging_config.logger import setup_logging
 
     settings = Settings.load()
@@ -376,7 +376,7 @@ def cmd_loan_guard(args) -> None:
     import time
 
     from bot.config.settings import Settings
-    from bot.exchange.binance_client import BinanceClient
+    from bot.exchange.binance_native_client import BinanceClient
     from bot.llm.client import ClaudeCLIClient
     from bot.logging_config import get_logger
     from bot.logging_config.logger import setup_logging

@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot.config.settings import Settings
 from bot.data.fetcher import DataFetcher
-from bot.exchange.binance_client import BinanceClient
+from bot.exchange.binance_native_client import BinanceClient
 from bot.logging_config.logger import setup_logging
 
 

@@ -7,7 +7,7 @@ from bot.config.settings import Settings
 from bot.data.bar_aggregator import BarAggregator
 from bot.data.models import AggTrade, OrderFlowBar
 from bot.data.stream import BinanceAggTradeStream
-from bot.exchange.binance_client import BinanceClient
+from bot.exchange.binance_native_client import BinanceClient
 from bot.execution.executor import OrderExecutor
 from bot.execution.order_manager import OrderManager
 from bot.llm.decision_engine import LLMDecisionEngine

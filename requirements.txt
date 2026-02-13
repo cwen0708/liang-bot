@@ -1,5 +1,6 @@
-# Exchange API
-ccxt>=4.4.0
+# Exchange API (Binance Official SDK)
+binance-connector>=3.0.0
+binance-futures-connector>=4.0.0
 
 # Data & Analysis
 pandas>=2.2.0

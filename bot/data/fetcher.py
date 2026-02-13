@@ -1,5 +1,6 @@
 """市場數據抓取與快取。"""
 
+import threading
 import time
 from pathlib import Path
 
@@ -22,6 +23,7 @@ class DataFetcher:
         self._exchange = exchange
         # TTL 記憶體快取: key="SYMBOL|TF" → (DataFrame, monotonic_time)
         self._ohlcv_cache: dict[str, tuple[pd.DataFrame, float]] = {}
+        self._cache_lock = threading.Lock()
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     def fetch_ohlcv(
@@ -37,21 +39,23 @@ class DataFetcher:
             key = f"{symbol}|{timeframe}"
             now = time.monotonic()
 
-            # 清理過期條目（避免記憶體洩漏）
-            expired = [k for k, v in self._ohlcv_cache.items() if (now - v[1]) >= cache_ttl]
-            for k in expired:
-                del self._ohlcv_cache[k]
+            with self._cache_lock:
+                # 清理過期條目（避免記憶體洩漏）
+                expired = [k for k, v in self._ohlcv_cache.items() if (now - v[1]) >= cache_ttl]
+                for k in expired:
+                    del self._ohlcv_cache[k]
 
-            entry = self._ohlcv_cache.get(key)
-            if entry and (now - entry[1]) < cache_ttl:
-                logger.debug("OHLCV 快取命中: %s %s", symbol, timeframe)
-                return entry[0]
+                entry = self._ohlcv_cache.get(key)
+                if entry and (now - entry[1]) < cache_ttl:
+                    logger.debug("OHLCV 快取命中: %s %s", symbol, timeframe)
+                    return entry[0]
 
         logger.debug("抓取 %s %s K 線 (limit=%d)", symbol, timeframe, limit)
         df = self._exchange.get_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
         if cache_ttl > 0:
-            self._ohlcv_cache[f"{symbol}|{timeframe}"] = (df, time.monotonic())
+            with self._cache_lock:
+                self._ohlcv_cache[f"{symbol}|{timeframe}"] = (df, time.monotonic())
 
         return df
 
@@ -79,7 +83,8 @@ class DataFetcher:
 
     def clear_ohlcv_cache(self) -> None:
         """清空記憶體快取。"""
-        self._ohlcv_cache.clear()
+        with self._cache_lock:
+            self._ohlcv_cache.clear()
 
     def fetch_historical(
         self,

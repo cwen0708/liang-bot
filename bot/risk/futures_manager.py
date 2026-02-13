@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import date
 
@@ -50,16 +51,69 @@ class FuturesRiskManager:
     ) -> None:
         self.config = config
         self.horizon_config = horizon_config or HorizonRiskConfig()
+        self._lock = threading.Lock()
         self._open_positions: dict[str, dict] = {}  # key = "{symbol}:{side}"
+        self._reserved_slots: set[str] = set()  # 預留中的 pos_key
         self._daily_pnl: float = 0.0
         self._pnl_date: date = date.today()
 
     @property
     def open_position_count(self) -> int:
-        return len(self._open_positions)
+        with self._lock:
+            return len(self._open_positions)
 
     def _pos_key(self, symbol: str, side: str) -> str:
         return f"{symbol}:{side}"
+
+    # ─── Thread-safe slot reservation（並行下單用）───
+
+    def reserve_slot(self, symbol: str, side: str) -> bool:
+        """預留一個持倉 slot。並行處理時防止超額開倉。"""
+        pos_key = self._pos_key(symbol, side)
+        with self._lock:
+            if pos_key in self._open_positions or pos_key in self._reserved_slots:
+                return False
+            total = len(self._open_positions) + len(self._reserved_slots)
+            if total >= self.config.max_open_positions:
+                return False
+            self._reserved_slots.add(pos_key)
+            logger.debug("預留 slot: %s (已佔 %d/%d)", pos_key, total + 1, self.config.max_open_positions)
+            return True
+
+    def confirm_position(
+        self, symbol: str, side: str, quantity: float,
+        entry_price: float, leverage: int = 1,
+        tp_order_id: str | None = None, sl_order_id: str | None = None,
+        stop_loss_price: float = 0.0, take_profit_price: float = 0.0,
+    ) -> None:
+        """確認預留 slot 並轉為正式持倉。"""
+        pos_key = self._pos_key(symbol, side)
+        with self._lock:
+            self._reserved_slots.discard(pos_key)
+            self._open_positions[pos_key] = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "entry_price": entry_price,
+                "leverage": leverage,
+                "tp_order_id": tp_order_id,
+                "sl_order_id": sl_order_id,
+                "stop_loss_price": stop_loss_price,
+                "take_profit_price": take_profit_price,
+            }
+        side_label = "多" if side == "long" else "空"
+        logger.info(
+            "確認%s倉: %s qty=%.8f entry=%.2f leverage=%dx SL=%.2f TP=%.2f",
+            side_label, symbol, quantity, entry_price, leverage,
+            stop_loss_price, take_profit_price,
+        )
+
+    def release_slot(self, symbol: str, side: str) -> None:
+        """釋放預留 slot（下單失敗或 LLM 拒絕時呼叫）。"""
+        pos_key = self._pos_key(symbol, side)
+        with self._lock:
+            self._reserved_slots.discard(pos_key)
+        logger.debug("釋放 slot: %s", pos_key)
 
     # ─── Horizon 參數 ───
 
@@ -101,20 +155,21 @@ class FuturesRiskManager:
         if signal not in (Signal.BUY, Signal.SHORT):
             return None
 
-        self._reset_daily_pnl_if_needed()
+        with self._lock:
+            self._reset_daily_pnl_if_needed()
 
-        # 基本風控檢查（僅標記）
-        reason = ""
-        if margin_ratio >= self.config.max_margin_ratio:
-            reason = f"保證金比率 {margin_ratio:.1%} >= {self.config.max_margin_ratio:.0%}"
-        elif self._daily_pnl < -(available_margin * self.config.max_daily_loss_pct):
-            reason = f"已達每日虧損限制 ({self.config.max_daily_loss_pct * 100:.1f}%)"
-        elif self.open_position_count >= self.config.max_open_positions:
-            reason = f"已達最大持倉數 ({self.config.max_open_positions})"
-        else:
-            pos_key = self._pos_key(symbol, side)
-            if pos_key in self._open_positions:
-                reason = f"已持有 {symbol} {side}"
+            # 基本風控檢查（僅標記）
+            reason = ""
+            if margin_ratio >= self.config.max_margin_ratio:
+                reason = f"保證金比率 {margin_ratio:.1%} >= {self.config.max_margin_ratio:.0%}"
+            elif self._daily_pnl < -(available_margin * self.config.max_daily_loss_pct):
+                reason = f"已達每日虧損限制 ({self.config.max_daily_loss_pct * 100:.1f}%)"
+            elif len(self._open_positions) + len(self._reserved_slots) >= self.config.max_open_positions:
+                reason = f"已達最大持倉數 ({self.config.max_open_positions})"
+            else:
+                pos_key = self._pos_key(symbol, side)
+                if pos_key in self._open_positions or pos_key in self._reserved_slots:
+                    reason = f"已持有 {symbol} {side}"
 
         # SL/TP
         stop_loss, take_profit, sl_distance, tp_distance = self._calc_sl_tp(
@@ -211,18 +266,19 @@ class FuturesRiskManager:
             horizon: 持倉週期 (short/medium/long)
             llm_size_pct: LLM 建議倉位佔比
         """
-        self._reset_daily_pnl_if_needed()
+        with self._lock:
+            self._reset_daily_pnl_if_needed()
 
-        if signal == Signal.BUY:
-            return self._evaluate_open(symbol, "long", price, available_margin, margin_ratio, ohlcv, horizon, llm_size_pct)
-        elif signal == Signal.SHORT:
-            return self._evaluate_open(symbol, "short", price, available_margin, margin_ratio, ohlcv, horizon, llm_size_pct)
-        elif signal == Signal.SELL:
-            return self._evaluate_close(symbol, "long", price)
-        elif signal == Signal.COVER:
-            return self._evaluate_close(symbol, "short", price)
-        else:
-            return FuturesRiskOutput(approved=False, reason="HOLD 訊號")
+            if signal == Signal.BUY:
+                return self._evaluate_open(symbol, "long", price, available_margin, margin_ratio, ohlcv, horizon, llm_size_pct)
+            elif signal == Signal.SHORT:
+                return self._evaluate_open(symbol, "short", price, available_margin, margin_ratio, ohlcv, horizon, llm_size_pct)
+            elif signal == Signal.SELL:
+                return self._evaluate_close(symbol, "long", price)
+            elif signal == Signal.COVER:
+                return self._evaluate_close(symbol, "short", price)
+            else:
+                return FuturesRiskOutput(approved=False, reason="HOLD 訊號")
 
     # ─── 開倉評估 ───
 
@@ -234,6 +290,8 @@ class FuturesRiskManager:
         llm_size_pct: float = 0.0,
     ) -> FuturesRiskOutput:
         """評估開倉（開多或開空）。"""
+        # 注意: 呼叫者 evaluate() 已持有 self._lock
+
         # ── 1. 基礎風控檢查 ──
 
         # 保證金比率檢查
@@ -248,15 +306,16 @@ class FuturesRiskManager:
             logger.warning(reason)
             return FuturesRiskOutput(approved=False, reason=reason)
 
-        # 最大持倉數
-        if self.open_position_count >= self.config.max_open_positions:
+        # 最大持倉數（含預留 slot）
+        total = len(self._open_positions) + len(self._reserved_slots)
+        if total >= self.config.max_open_positions:
             reason = f"已達最大持倉數 ({self.config.max_open_positions})"
             logger.warning(reason)
             return FuturesRiskOutput(approved=False, reason=reason)
 
-        # 已持有同方向持倉
+        # 已持有或已預留同方向持倉
         pos_key = self._pos_key(symbol, side)
-        if pos_key in self._open_positions:
+        if pos_key in self._open_positions or pos_key in self._reserved_slots:
             reason = f"已持有 {symbol} {side} 倉"
             logger.info(reason)
             return FuturesRiskOutput(approved=False, reason=reason)
@@ -409,19 +468,25 @@ class FuturesRiskManager:
         stop_loss_price: float = 0.0,
         take_profit_price: float = 0.0,
     ) -> None:
-        """記錄新持倉（含 SL/TP 價位）。"""
+        """記錄新持倉（含 SL/TP 價位）。
+
+        若已透過 reserve_slot → confirm_position 流程，建議使用
+        confirm_position 代替此方法。此方法保留用於向後相容。
+        """
         pos_key = self._pos_key(symbol, side)
-        self._open_positions[pos_key] = {
-            "symbol": symbol,
-            "side": side,
-            "quantity": quantity,
-            "entry_price": entry_price,
-            "leverage": leverage,
-            "tp_order_id": tp_order_id,
-            "sl_order_id": sl_order_id,
-            "stop_loss_price": stop_loss_price,
-            "take_profit_price": take_profit_price,
-        }
+        with self._lock:
+            self._reserved_slots.discard(pos_key)
+            self._open_positions[pos_key] = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "entry_price": entry_price,
+                "leverage": leverage,
+                "tp_order_id": tp_order_id,
+                "sl_order_id": sl_order_id,
+                "stop_loss_price": stop_loss_price,
+                "take_profit_price": take_profit_price,
+            }
         side_label = "多" if side == "long" else "空"
         logger.info(
             "新增%s倉: %s qty=%.8f entry=%.2f leverage=%dx SL=%.2f TP=%.2f",
@@ -432,19 +497,20 @@ class FuturesRiskManager:
     def remove_position(self, symbol: str, side: str, exit_price: float) -> float:
         """移除持倉並計算損益。"""
         pos_key = self._pos_key(symbol, side)
-        if pos_key not in self._open_positions:
-            return 0.0
+        with self._lock:
+            if pos_key not in self._open_positions:
+                return 0.0
 
-        position = self._open_positions.pop(pos_key)
-        entry = position["entry_price"]
-        qty = position["quantity"]
+            position = self._open_positions.pop(pos_key)
+            entry = position["entry_price"]
+            qty = position["quantity"]
 
-        if side == "long":
-            pnl = (exit_price - entry) * qty
-        else:  # short
-            pnl = (entry - exit_price) * qty
+            if side == "long":
+                pnl = (exit_price - entry) * qty
+            else:  # short
+                pnl = (entry - exit_price) * qty
 
-        self._daily_pnl += pnl
+            self._daily_pnl += pnl
 
         side_label = "多" if side == "long" else "空"
         logger.info(
@@ -462,17 +528,18 @@ class FuturesRiskManager:
         若無儲存值則 fallback 到固定百分比（向後相容）。
         """
         pos_key = self._pos_key(symbol, side)
-        if pos_key not in self._open_positions:
-            return Signal.HOLD
+        with self._lock:
+            if pos_key not in self._open_positions:
+                return Signal.HOLD
 
-        position = self._open_positions[pos_key]
-        entry = position["entry_price"]
+            position = self._open_positions[pos_key]
+            entry = position["entry_price"]
 
-        # 優先使用開倉時儲存的 SL/TP 價位
-        stop_loss = position.get("stop_loss_price", 0.0)
-        take_profit = position.get("take_profit_price", 0.0)
+            # 優先使用開倉時儲存的 SL/TP 價位
+            stop_loss = position.get("stop_loss_price", 0.0)
+            take_profit = position.get("take_profit_price", 0.0)
 
-        # Fallback: 若無儲存值（舊持倉或恢復時），用固定百分比
+        # Fallback: 若無儲存值（舊持倉或恢復時），用固定百分比（鎖外計算）
         if stop_loss <= 0 or take_profit <= 0:
             if side == "long":
                 stop_loss = entry * (1 - self.config.stop_loss_pct)
@@ -513,10 +580,11 @@ class FuturesRiskManager:
     def get_sl_tp_order_ids(self, symbol: str, side: str) -> tuple[str | None, str | None]:
         """取得持倉的 SL/TP 掛單 ID。"""
         pos_key = self._pos_key(symbol, side)
-        pos = self._open_positions.get(pos_key)
-        if not pos:
-            return None, None
-        return pos.get("tp_order_id"), pos.get("sl_order_id")
+        with self._lock:
+            pos = self._open_positions.get(pos_key)
+            if not pos:
+                return None, None
+            return pos.get("tp_order_id"), pos.get("sl_order_id")
 
     def has_exchange_sl_tp(self, symbol: str, side: str) -> bool:
         """該持倉是否有交易所掛單中的 SL/TP。"""
@@ -525,13 +593,17 @@ class FuturesRiskManager:
 
     def get_position(self, symbol: str, side: str) -> dict | None:
         """取得指定持倉。"""
-        return self._open_positions.get(self._pos_key(symbol, side))
+        with self._lock:
+            pos = self._open_positions.get(self._pos_key(symbol, side))
+            return dict(pos) if pos else None
 
     def get_all_positions(self) -> dict[str, dict]:
-        """取得所有持倉。"""
-        return dict(self._open_positions)
+        """取得所有持倉（回傳副本，thread-safe）。"""
+        with self._lock:
+            return {k: dict(v) for k, v in self._open_positions.items()}
 
     def _reset_daily_pnl_if_needed(self) -> None:
+        """重置每日 PnL（呼叫者需持有 self._lock）。"""
         today = date.today()
         if today != self._pnl_date:
             self._daily_pnl = 0.0

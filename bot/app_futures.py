@@ -14,7 +14,7 @@ from bot.config.settings import Settings
 from bot.data.bar_aggregator import BarAggregator
 from bot.data.fetcher import DataFetcher
 from bot.db.supabase_client import SupabaseWriter
-from bot.exchange.futures_client import FuturesBinanceClient
+from bot.exchange.futures_native_client import FuturesBinanceClient
 from bot.execution.futures_executor import FuturesOrderExecutor
 from bot.llm.decision_engine import LLMDecisionEngine
 from bot.llm.schemas import PortfolioState, PositionInfo

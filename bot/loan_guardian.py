@@ -16,7 +16,7 @@ from bot.utils.helpers import parse_json_response
 
 if TYPE_CHECKING:
     from bot.db.supabase_client import SupabaseWriter
-    from bot.exchange.binance_client import BinanceClient
+    from bot.exchange.binance_native_client import BinanceClient
     from bot.llm.client import ClaudeCLIClient
 
 logger = get_logger("loan_guardian")

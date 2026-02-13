@@ -11,7 +11,7 @@ from bot.backtest.report import save_report
 from bot.backtest.simulator import BacktestSimulator
 from bot.config.settings import Settings
 from bot.data.fetcher import DataFetcher
-from bot.exchange.binance_client import BinanceClient
+from bot.exchange.binance_native_client import BinanceClient
 from bot.logging_config.logger import setup_logging
 from bot.strategy.sma_crossover import SMACrossoverStrategy
 

@@ -9,7 +9,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from bot.config.settings import Settings
 from bot.config.constants import TradingMode
-from bot.exchange.binance_client import BinanceClient
+from bot.exchange.binance_native_client import BinanceClient
 from bot.execution.executor import OrderExecutor
 from bot.db.supabase_client import SupabaseWriter
 from bot.risk.manager import RiskOutput

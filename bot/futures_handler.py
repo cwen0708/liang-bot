@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from bot.config.constants import DataFeedType, TF_MINUTES
 from bot.logging_config import get_logger
 from bot.llm.schemas import PortfolioState, PositionInfo
+from bot.strategy.router import StrategyRouter
 from bot.strategy.signals import Signal, StrategyVerdict
 
 if TYPE_CHECKING:
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     from bot.config.settings import Settings
     from bot.data.fetcher import DataFetcher
     from bot.db.supabase_client import SupabaseWriter
-    from bot.exchange.futures_client import FuturesBinanceClient
+    from bot.exchange.futures_native_client import FuturesBinanceClient
     from bot.execution.futures_executor import FuturesOrderExecutor
     from bot.llm.decision_engine import LLMDecisionEngine
     from bot.risk.futures_manager import FuturesRiskManager
@@ -143,8 +144,8 @@ class FuturesHandler:
                     logger.info("%s[合約] %s %s倉觸發停損/停利", _L2, symbol, close_side)
                     self._execute_close(symbol, close_side, current_price, cycle_id)
 
-        # ── 3. 收集策略結論 ──
-        self._router.clear()
+        # ── 3. 收集策略結論（per-call router，thread-safe）──
+        router = StrategyRouter()
 
         for strategy in strategies:
             if strategy.data_feed_type != DataFeedType.OHLCV:
@@ -161,7 +162,7 @@ class FuturesHandler:
                 continue
 
             if verdict is not None:
-                self._router.collect(verdict)
+                router.collect(verdict)
                 self._db.insert_verdict(
                     symbol, strategy.name, verdict.signal.value,
                     verdict.confidence, verdict.reasoning, cycle_id,
@@ -177,7 +178,7 @@ class FuturesHandler:
                     _L2, abbr, tf_label, sig_str, verdict.reasoning[:80],
                 )
 
-        verdicts = self._router.get_verdicts()
+        verdicts = router.get_verdicts()
         if not verdicts:
             return
 
@@ -444,7 +445,12 @@ class FuturesHandler:
             available = 0.0
 
         positions = []
-        for key, pos_data in self._risk._open_positions.items():
+        all_pos = self._risk.get_all_positions()  # thread-safe 副本
+        with self._risk._lock:
+            daily_pnl = self._risk._daily_pnl
+            pos_count = len(self._risk._open_positions)
+
+        for key, pos_data in all_pos.items():
             sym = pos_data["symbol"]
             entry = pos_data["entry_price"]
             qty = pos_data["quantity"]
@@ -470,7 +476,7 @@ class FuturesHandler:
             available_balance=available,
             positions=positions,
             max_positions=fc.max_open_positions,
-            current_position_count=self._risk.open_position_count,
-            daily_realized_pnl=self._risk._daily_pnl,
-            daily_risk_remaining=available * fc.max_daily_loss_pct + self._risk._daily_pnl,
+            current_position_count=pos_count,
+            daily_realized_pnl=daily_pnl,
+            daily_risk_remaining=available * fc.max_daily_loss_pct + daily_pnl,
         )

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useSupabase } from '@/composables/useSupabase'
-import type { LLMDecision, StrategyVerdict } from '@/types'
+import type { LLMDecision, StrategyVerdict, Order } from '@/types'
 
 const props = defineProps<{
   decision: LLMDecision | null
@@ -13,6 +13,7 @@ const emit = defineEmits<{
 
 const supabase = useSupabase()
 const verdicts = ref<StrategyVerdict[]>([])
+const orders = ref<Order[]>([])
 const loading = ref(false)
 
 const allStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'macd_momentum', 'vwap_reversion', 'ema_ribbon', 'tia_orderflow']
@@ -28,17 +29,27 @@ const strategyLabel: Record<string, string> = {
 
 type VerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
 
-/** When decision changes, fetch verdicts by cycle_id */
+/** When decision changes, fetch verdicts + orders by cycle_id */
 watch(() => props.decision, async (d) => {
   verdicts.value = []
+  orders.value = []
   if (!d?.cycle_id) return
   loading.value = true
-  const { data } = await supabase
-    .from('strategy_verdicts')
-    .select('*')
-    .eq('cycle_id', d.cycle_id)
-    .eq('symbol', d.symbol)
-  if (data) verdicts.value = data as StrategyVerdict[]
+  const [verdictRes, orderRes] = await Promise.all([
+    supabase
+      .from('strategy_verdicts')
+      .select('*')
+      .eq('cycle_id', d.cycle_id)
+      .eq('symbol', d.symbol),
+    supabase
+      .from('orders')
+      .select('*')
+      .eq('cycle_id', d.cycle_id)
+      .eq('symbol', d.symbol)
+      .order('created_at', { ascending: false }),
+  ])
+  if (verdictRes.data) verdicts.value = verdictRes.data as StrategyVerdict[]
+  if (orderRes.data) orders.value = orderRes.data as Order[]
   loading.value = false
 })
 
@@ -73,6 +84,18 @@ function signalBadgeClass(signal: string) {
   if (signal === 'BUY') return 'text-(--color-success)'
   if (signal === 'SELL') return 'text-(--color-danger)'
   return 'text-(--color-text-muted)'
+}
+
+function computeRR(d: LLMDecision): string {
+  const entry = d.entry_price ?? 0
+  const sl = d.stop_loss ?? 0
+  const tp = d.take_profit ?? 0
+  if (!entry || !sl || !tp) return '—'
+  const isShort = d.action === 'SHORT' || d.action === 'SELL'
+  const slDist = isShort ? sl - entry : entry - sl
+  const tpDist = isShort ? entry - tp : tp - entry
+  if (slDist <= 0) return '—'
+  return (tpDist / slDist).toFixed(2)
 }
 
 function verdictBgStyle(signal: string, confidence: number): Record<string, string> {
@@ -129,6 +152,28 @@ function verdictBgStyle(signal: string, confidence: number): Record<string, stri
             <!-- Full reasoning -->
             <div class="text-sm text-(--color-text-primary) leading-relaxed whitespace-pre-wrap">{{ decision.reasoning.replace(/。/g, '。\n\n') }}</div>
 
+            <!-- LLM 建議價位 -->
+            <div v-if="decision.stop_loss || decision.take_profit" class="rounded-lg border border-(--color-border) overflow-hidden">
+              <div class="px-3 py-1.5 text-xs font-medium text-(--color-text-secondary) bg-(--color-bg-secondary)">LLM 建議價位</div>
+              <div class="grid grid-cols-3 divide-x divide-(--color-border)">
+                <div class="px-3 py-2.5 text-center">
+                  <div class="text-[11px] text-(--color-text-muted) mb-0.5">停損</div>
+                  <div class="text-sm font-bold tabular-nums text-(--color-danger)">{{ decision.stop_loss ? decision.stop_loss.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—' }}</div>
+                </div>
+                <div class="px-3 py-2.5 text-center">
+                  <div class="text-[11px] text-(--color-text-muted) mb-0.5">進場</div>
+                  <div class="text-sm font-bold tabular-nums text-(--color-text-primary)">{{ decision.entry_price ? decision.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—' }}</div>
+                </div>
+                <div class="px-3 py-2.5 text-center">
+                  <div class="text-[11px] text-(--color-text-muted) mb-0.5">停利</div>
+                  <div class="text-sm font-bold tabular-nums text-(--color-success)">{{ decision.take_profit ? decision.take_profit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—' }}</div>
+                </div>
+              </div>
+              <div v-if="decision.stop_loss && decision.take_profit && decision.entry_price" class="px-3 py-1.5 text-center text-xs text-(--color-text-muted) bg-(--color-bg-secondary) border-t border-(--color-border)">
+                R:R {{ computeRR(decision) }}
+              </div>
+            </div>
+
             <!-- Strategy verdicts -->
             <div v-if="loading" class="text-sm text-(--color-text-muted)">載入策略...</div>
             <div v-else class="flex flex-col gap-2">
@@ -150,6 +195,39 @@ function verdictBgStyle(signal: string, confidence: number): Record<string, stri
                   <span v-else class="text-sm text-(--color-text-muted) opacity-30">-</span>
                 </div>
                 <div v-if="slot.verdict?.reasoning" class="text-xs text-(--color-text-secondary) leading-relaxed">{{ slot.verdict.reasoning }}</div>
+              </div>
+            </div>
+
+            <!-- Related orders -->
+            <div v-if="orders.length" class="flex flex-col gap-2">
+              <div class="text-sm font-medium text-(--color-text-secondary)">關聯訂單</div>
+              <div
+                v-for="order in orders"
+                :key="order.id"
+                class="rounded-lg p-3 bg-(--color-bg-secondary)"
+              >
+                <div class="flex items-center justify-between mb-1">
+                  <div class="flex items-center gap-1.5">
+                    <span class="text-sm font-bold" :class="order.side === 'buy' ? 'text-(--color-success)' : 'text-(--color-danger)'">
+                      {{ order.side === 'buy' ? '買入' : '賣出' }}
+                    </span>
+                    <span v-if="order.market_type === 'futures' && order.position_side" class="text-[11px] px-1.5 py-0.5 rounded bg-(--color-bg-tertiary) text-(--color-text-muted)">
+                      {{ order.position_side === 'long' ? '多' : '空' }}
+                    </span>
+                    <span v-if="order.market_type === 'futures' && order.leverage" class="text-[11px] px-1.5 py-0.5 rounded bg-(--color-bg-tertiary) text-(--color-text-muted)">
+                      {{ order.leverage }}x
+                    </span>
+                    <span v-if="order.reduce_only" class="text-[11px] px-1.5 py-0.5 rounded bg-(--color-warning-subtle) text-(--color-warning)">
+                      減倉
+                    </span>
+                  </div>
+                  <span class="text-xs text-(--color-text-muted)">{{ order.status }}</span>
+                </div>
+                <div class="flex items-center gap-3 text-xs text-(--color-text-secondary)">
+                  <span>數量 {{ order.filled || order.quantity }}</span>
+                  <span>@ {{ order.price }}</span>
+                  <span class="ml-auto">{{ formatDateTime(order.created_at) }}</span>
+                </div>
               </div>
             </div>
           </div>

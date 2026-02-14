@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 from binance.error import ClientError, ServerError
 from binance.um_futures import UMFutures
@@ -14,6 +16,7 @@ from bot.exchange.exceptions import (
     InsufficientBalanceError,
     OrderError,
     RateLimitError,
+    ReduceOnlyError,
 )
 from bot.logging_config import get_logger
 from bot.utils.decorators import retry
@@ -27,6 +30,7 @@ _ERROR_MAP: dict[int, type[ExchangeError]] = {
     -1015: RateLimitError,
     -2010: InsufficientBalanceError,
     -2013: OrderError,
+    -2022: ReduceOnlyError,
 }
 
 
@@ -275,11 +279,12 @@ class FuturesBinanceClient(BaseFuturesExchange):
 
     # ─── 下單 ───
 
-    @retry(max_retries=2, delay=0.5)
+    @retry(max_retries=2, delay=0.5, no_retry_on=(ReduceOnlyError,))
     def place_market_order(
         self, symbol: str, side: str, amount: float,
         reduce_only: bool = False,
     ) -> dict:
+        amount = self._round_quantity(symbol, amount)
         logger.info(
             "合約市價單: %s %s %.8f reduce_only=%s",
             side.upper(), symbol, amount, reduce_only,
@@ -294,7 +299,26 @@ class FuturesBinanceClient(BaseFuturesExchange):
             if reduce_only:
                 kwargs["reduceOnly"] = "true"
             order = self._client.new_order(**kwargs)
-            logger.info("合約市價單成交: ID=%s, 狀態=%s", order["orderId"], order["status"])
+            logger.info("合約市價單回應: ID=%s, 狀態=%s", order["orderId"], order["status"])
+
+            # Testnet 市價單可能回傳 status=NEW, executedQty=0
+            # 需要查詢訂單取得實際成交資訊
+            filled = float(order.get("executedQty", 0))
+            if filled == 0 and order.get("status") not in ("CANCELED", "REJECTED", "EXPIRED"):
+                import time as _time
+                _time.sleep(0.5)
+                try:
+                    order = self._client.query_order(
+                        symbol=self._to_native(symbol),
+                        orderId=order["orderId"],
+                    )
+                    logger.info(
+                        "合約市價單查詢確認: filled=%.8f, status=%s",
+                        float(order.get("executedQty", 0)), order.get("status"),
+                    )
+                except Exception as e:
+                    logger.warning("查詢市價單成交狀態失敗: %s", e)
+
             return self._format_order(order, symbol)
         except ClientError as e:
             raise _map_error(e, "合約下單失敗") from e
@@ -306,6 +330,8 @@ class FuturesBinanceClient(BaseFuturesExchange):
         self, symbol: str, side: str, amount: float, price: float,
         reduce_only: bool = False,
     ) -> dict:
+        amount = self._round_quantity(symbol, amount)
+        price = self._round_price(symbol, price)
         logger.info(
             "合約限價單: %s %s %.8f @ %.2f reduce_only=%s",
             side.upper(), symbol, amount, price, reduce_only,
@@ -335,6 +361,8 @@ class FuturesBinanceClient(BaseFuturesExchange):
         stop_price: float, reduce_only: bool = True,
     ) -> dict:
         """停損市價單（STOP_MARKET）。"""
+        amount = self._round_quantity(symbol, amount)
+        stop_price = self._round_price(symbol, stop_price)
         logger.info(
             "合約停損單: %s %s %.8f stop=%.2f",
             side.upper(), symbol, amount, stop_price,
@@ -363,6 +391,8 @@ class FuturesBinanceClient(BaseFuturesExchange):
         stop_price: float, reduce_only: bool = True,
     ) -> dict:
         """停利市價單（TAKE_PROFIT_MARKET）。"""
+        amount = self._round_quantity(symbol, amount)
+        stop_price = self._round_price(symbol, stop_price)
         logger.info(
             "合約停利單: %s %s %.8f stop=%.2f",
             side.upper(), symbol, amount, stop_price,
@@ -462,6 +492,28 @@ class FuturesBinanceClient(BaseFuturesExchange):
         if info:
             return info["min_qty"]
         return 0.0
+
+    def _round_step(self, value: float, step: float) -> float:
+        """根據 step_size/tick_size 截斷數值（向下取整，避免超出精度）。"""
+        if step <= 0:
+            return value
+        precision = max(0, round(-math.log10(step)))
+        factor = 10 ** precision
+        return math.floor(value * factor) / factor
+
+    def _round_quantity(self, symbol: str, amount: float) -> float:
+        """根據交易對的 step_size 截斷下單數量。"""
+        info = self._market_info.get(symbol)
+        if info and info["step_size"] > 0:
+            return self._round_step(amount, info["step_size"])
+        return amount
+
+    def _round_price(self, symbol: str, price: float) -> float:
+        """根據交易對的 tick_size 截斷價格。"""
+        info = self._market_info.get(symbol)
+        if info and info["tick_size"] > 0:
+            return self._round_step(price, info["tick_size"])
+        return price
 
     # ─── AggTrades ───
 

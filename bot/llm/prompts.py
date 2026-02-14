@@ -59,13 +59,25 @@ SYSTEM_PROMPT = """你是一位資深加密貨幣交易決策者。你的任務�
 {
   "action": "BUY",
   "confidence": 0.75,
-  "stop_loss_pct": 0.03,
-  "take_profit_pct": 0.06,
+  "entry_price": 43500.00,
+  "stop_loss": 42200.00,
+  "take_profit": 46100.00,
   "reasoning": "策略 A 的 CVD 看漲背離強度高且 SFP 確認...",
   "position_size_pct": 0.02,
   "horizon": "medium"
 }
 ```
+
+### 價位設定指引
+
+- **entry_price**: 你認為理想的進場價位（通常接近現價）。系統使用市價單進場，此價位用於判斷現價是否值得進場
+- **stop_loss**: 具體的停損價位（做多時低於 entry_price）
+  - 參考風控指標中的「停損價」和支撐壓力位
+  - 做多停損應設在最近支撐位下方
+  - 停損距離不應小於現價的 0.5%（防止頻繁觸發）
+- **take_profit**: 具體的停利價位（做多時高於 entry_price）
+  - 參考風控指標中的「停利價」和 Fibonacci 回撤位
+  - 確保盈虧比 (R:R) >= 所選 horizon 的最低要求
 
 action 只能是 "BUY"、"SELL" 或 "HOLD" 之一。
 horizon 只能是 "short"、"medium" 或 "long" 之一。
@@ -153,13 +165,30 @@ FUTURES_SYSTEM_PROMPT = """你是一位資深加密貨幣合約交易決策者�
 {
   "action": "BUY",
   "confidence": 0.75,
-  "stop_loss_pct": 0.02,
-  "take_profit_pct": 0.04,
+  "entry_price": 43500.00,
+  "stop_loss": 42200.00,
+  "take_profit": 46100.00,
   "reasoning": "CVD 持續上升且 RSI 未超買，開多倉...",
   "position_size_pct": 0.02,
   "horizon": "medium"
 }
 ```
+
+### 價位設定指引
+
+- **entry_price**: 你認為理想的進場價位（通常接近現價）。系統使用市價單進場，此價位用於判斷現價是否值得進場
+- **stop_loss**: 具體的停損價位
+  - 做多 (BUY): 停損低於 entry_price，設在最近支撐位下方
+  - 做空 (SHORT): 停損高於 entry_price，設在最近壓力位上方
+  - 參考風控指標中的「停損價」和支撐壓力位
+  - 停損距離不應小於現價的 0.5%（防止頻繁觸發）
+  - 槓桿越高，停損距離應越窄
+- **take_profit**: 具體的停利價位
+  - 做多 (BUY): 停利高於 entry_price
+  - 做空 (SHORT): 停利低於 entry_price
+  - 參考風控指標中的「停利價」和 Fibonacci 回撤位
+  - 確保盈虧比 (R:R) >= 所選 horizon 的最低要求
+- SELL/COVER/HOLD 動作不需要設定價位，填 0 即可
 
 action 只能是 "BUY"、"SELL"、"SHORT"、"COVER" 或 "HOLD" 之一。
 horizon 只能是 "short"、"medium" 或 "long" 之一。

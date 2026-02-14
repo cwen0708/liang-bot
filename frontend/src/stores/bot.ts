@@ -65,7 +65,8 @@ export const useBotStore = defineStore('bot', () => {
   })
 
   const netLoanValue = computed<number | null>(() => {
-    if (!pricesReady.value || !loans.value.length) return null
+    if (!pricesReady.value) return null
+    if (!loans.value.length) return 0
     return loans.value.reduce((sum, loan) => {
       const priceKey = loan.collateral_coin + '/USDT'
       const price = latestPrices.value[priceKey] ?? 0
@@ -87,7 +88,7 @@ export const useBotStore = defineStore('bot', () => {
       .eq('mode', globalMode.value)
       .order('updated_at', { ascending: false })
       .limit(1)
-    if (data?.[0]) status.value = data[0] as BotStatus
+    status.value = (data?.[0] as BotStatus) ?? null
   }
 
   async function fetchPositions() {
@@ -96,7 +97,7 @@ export const useBotStore = defineStore('bot', () => {
       .select('*')
       .eq('mode', globalMode.value)
       .order('updated_at', { ascending: false })
-    if (data) positions.value = data as Position[]
+    positions.value = (data as Position[]) ?? []
   }
 
   async function fetchLatestPrices() {
@@ -153,18 +154,20 @@ export const useBotStore = defineStore('bot', () => {
       .eq('mode', globalMode.value)
       .order('created_at', { ascending: false })
       .limit(20)
-    if (data) {
-      const seen = new Set<string>()
-      const unique: LoanHealth[] = []
-      for (const row of data as LoanHealth[]) {
-        const key = `${row.collateral_coin}/${row.loan_coin}`
-        if (!seen.has(key)) {
-          unique.push(row)
-          seen.add(key)
-        }
-      }
-      loans.value = unique
+    if (!data?.length) {
+      loans.value = []
+      return
     }
+    const seen = new Set<string>()
+    const unique: LoanHealth[] = []
+    for (const row of data as LoanHealth[]) {
+      const key = `${row.collateral_coin}/${row.loan_coin}`
+      if (!seen.has(key)) {
+        unique.push(row)
+        seen.add(key)
+      }
+    }
+    loans.value = unique
   }
 
   async function fetchFuturesMargin() {
@@ -174,7 +177,7 @@ export const useBotStore = defineStore('bot', () => {
       .eq('mode', globalMode.value)
       .order('created_at', { ascending: false })
       .limit(1)
-    if (data?.[0]) futuresMargin.value = data[0] as FuturesMargin
+    futuresMargin.value = (data?.[0] as FuturesMargin) ?? null
   }
 
   async function fetchConfigPairs() {
@@ -209,7 +212,7 @@ export const useBotStore = defineStore('bot', () => {
       .eq('mode', globalMode.value)
       .order('created_at', { ascending: false })
       .limit(20)
-    if (data) futuresFunding.value = data as FuturesFunding[]
+    futuresFunding.value = (data as FuturesFunding[]) ?? []
   }
 
   // Subscribe to realtime updates

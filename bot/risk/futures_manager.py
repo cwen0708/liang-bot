@@ -247,32 +247,66 @@ class FuturesRiskManager:
 
     # ─── 評估入口 ───
 
+    def _validate_llm_prices(
+        self, price: float, llm_sl: float, llm_tp: float,
+        horizon: str = "medium", is_short: bool = False,
+    ) -> tuple[float, float, str]:
+        """驗證 LLM 的 SL/TP 價位，回傳 (sl, tp, note)。"""
+        hp = self._get_horizon_params(horizon)
+
+        if is_short:
+            if llm_sl <= price or llm_tp >= price:
+                return 0, 0, "做空方向不正確"
+            sl_dist = llm_sl - price
+            tp_dist = price - llm_tp
+        else:
+            if llm_sl >= price or llm_tp <= price:
+                return 0, 0, "做多方向不正確"
+            sl_dist = price - llm_sl
+            tp_dist = llm_tp - price
+
+        sl_pct = sl_dist / price
+        if sl_pct < 0.005:
+            return 0, 0, f"SL 距離太近 ({sl_pct:.2%} < 0.5%)"
+        if sl_pct > 0.15:
+            return 0, 0, f"SL 距離太遠 ({sl_pct:.2%} > 15%)"
+
+        rr = tp_dist / sl_dist if sl_dist > 0 else 0
+        note = ""
+        if rr < hp["min_rr"]:
+            adjusted_tp_dist = sl_dist * hp["min_rr"]
+            if is_short:
+                llm_tp = price - adjusted_tp_dist
+            else:
+                llm_tp = price + adjusted_tp_dist
+            note = f"TP 調整至 R:R>={hp['min_rr']:.1f} ({rr:.2f}→{hp['min_rr']:.1f})"
+            logger.info("LLM 價位調整: %s", note)
+
+        return llm_sl, llm_tp, note
+
     def evaluate(
         self, signal: Signal, symbol: str, price: float,
         available_margin: float, margin_ratio: float = 0.0,
         ohlcv: pd.DataFrame | None = None,
         horizon: str = "medium",
         llm_size_pct: float = 0.0,
+        llm_stop_loss: float = 0.0,
+        llm_take_profit: float = 0.0,
     ) -> FuturesRiskOutput:
-        """評估合約交易訊號。
-
-        Args:
-            signal: 交易訊號
-            symbol: 交易對
-            price: 當前價格
-            available_margin: 可用保證金
-            margin_ratio: 帳戶保證金比率
-            ohlcv: K 線數據，用於計算 ATR 動態 SL/TP
-            horizon: 持倉週期 (short/medium/long)
-            llm_size_pct: LLM 建議倉位佔比
-        """
+        """評估合約交易訊號。"""
         with self._lock:
             self._reset_daily_pnl_if_needed()
 
             if signal == Signal.BUY:
-                return self._evaluate_open(symbol, "long", price, available_margin, margin_ratio, ohlcv, horizon, llm_size_pct)
+                return self._evaluate_open(
+                    symbol, "long", price, available_margin, margin_ratio,
+                    ohlcv, horizon, llm_size_pct, llm_stop_loss, llm_take_profit,
+                )
             elif signal == Signal.SHORT:
-                return self._evaluate_open(symbol, "short", price, available_margin, margin_ratio, ohlcv, horizon, llm_size_pct)
+                return self._evaluate_open(
+                    symbol, "short", price, available_margin, margin_ratio,
+                    ohlcv, horizon, llm_size_pct, llm_stop_loss, llm_take_profit,
+                )
             elif signal == Signal.SELL:
                 return self._evaluate_close(symbol, "long", price)
             elif signal == Signal.COVER:
@@ -288,6 +322,8 @@ class FuturesRiskManager:
         ohlcv: pd.DataFrame | None = None,
         horizon: str = "medium",
         llm_size_pct: float = 0.0,
+        llm_stop_loss: float = 0.0,
+        llm_take_profit: float = 0.0,
     ) -> FuturesRiskOutput:
         """評估開倉（開多或開空）。"""
         # 注意: 呼叫者 evaluate() 已持有 self._lock
@@ -320,10 +356,35 @@ class FuturesRiskManager:
             logger.info(reason)
             return FuturesRiskOutput(approved=False, reason=reason)
 
-        # ── 2. 計算 SL/TP（ATR 動態 or 固定百分比，根據 horizon）──
-        stop_loss, take_profit, sl_distance, tp_distance = self._calc_sl_tp(
-            side, price, ohlcv, horizon,
-        )
+        # ── 2. 計算 SL/TP（優先用 LLM 價位，fallback ATR / 固定百分比）──
+        is_short = side == "short"
+        used_llm_prices = False
+        if llm_stop_loss > 0 and llm_take_profit > 0:
+            validated_sl, validated_tp, note = self._validate_llm_prices(
+                price, llm_stop_loss, llm_take_profit, horizon, is_short=is_short,
+            )
+            if validated_sl > 0 and validated_tp > 0:
+                stop_loss, take_profit = validated_sl, validated_tp
+                if is_short:
+                    sl_distance = stop_loss - price
+                    tp_distance = price - take_profit
+                else:
+                    sl_distance = price - stop_loss
+                    tp_distance = take_profit - price
+                used_llm_prices = True
+                if note:
+                    logger.info("LLM 價位: %s", note)
+                logger.info(
+                    "使用 LLM 價位: SL=%.2f, TP=%.2f (side=%s)",
+                    stop_loss, take_profit, side,
+                )
+            else:
+                logger.info("LLM 價位驗證失敗 (%s)，fallback ATR", note)
+
+        if not used_llm_prices:
+            stop_loss, take_profit, sl_distance, tp_distance = self._calc_sl_tp(
+                side, price, ohlcv, horizon,
+            )
 
         # ── 3. 盈虧比 (R:R) 檢查（根據 horizon）──
         hp = self._get_horizon_params(horizon)
@@ -601,6 +662,18 @@ class FuturesRiskManager:
         """取得所有持倉（回傳副本，thread-safe）。"""
         with self._lock:
             return {k: dict(v) for k, v in self._open_positions.items()}
+
+    def force_remove_position(self, symbol: str, side: str) -> None:
+        """強制移除幻影持倉（不記錄 PnL，用於對齊）。"""
+        pos_key = self._pos_key(symbol, side)
+        with self._lock:
+            removed = self._open_positions.pop(pos_key, None)
+        if removed:
+            side_label = "多" if side == "long" else "空"
+            logger.warning(
+                "強制移除幻影%s倉: %s (entry=%.2f, qty=%.8f)",
+                side_label, symbol, removed["entry_price"], removed["quantity"],
+            )
 
     def _reset_daily_pnl_if_needed(self) -> None:
         """重置每日 PnL（呼叫者需持有 self._lock）。"""

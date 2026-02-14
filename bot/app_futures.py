@@ -29,6 +29,7 @@ from bot.strategy.ema_ribbon import EMARibbonStrategy
 from bot.strategy.macd_momentum import MACDMomentumStrategy
 from bot.strategy.rsi_oversold import RSIOversoldStrategy
 from bot.strategy.sma_crossover import SMACrossoverStrategy
+from bot.reconciliation import PositionReconciler
 from bot.strategy.tia_orderflow import TiaBTCOrderFlowStrategy
 from bot.strategy.vwap_reversion import VWAPReversionStrategy
 
@@ -116,6 +117,20 @@ class FuturesTradingBot:
 
         attach_supabase_handler(self._db)
 
+        # 持倉對齊器
+        self._reconciler = PositionReconciler(
+            spot_exchange=None,
+            futures_exchange=self.exchange,
+            spot_risk=None,
+            futures_risk=self.risk_manager,
+            db=self._db,
+            settings=self.settings,
+        )
+        try:
+            self._reconciler.reconcile_futures()
+        except Exception:
+            logger.exception("啟動合約持倉對齊失敗，繼續運行")
+
         # OrderFlow 聚合器
         self._aggregators: dict[str, BarAggregator] = {}
         self._last_trade_id: dict[str, int] = {}
@@ -128,15 +143,27 @@ class FuturesTradingBot:
         """從 Supabase 恢復合約持倉。"""
         mode = self.settings.futures.mode.value
         rows = self._db.load_positions(mode, market_type="futures")
+        fc = self.settings.futures
         for row in rows:
             symbol = row.get("symbol", "")
             qty = row.get("quantity", 0)
             entry = row.get("entry_price", 0)
             side = row.get("side", "long")
-            leverage = row.get("leverage", self.settings.futures.leverage)
+            leverage = row.get("leverage", fc.leverage)
+            sl = row.get("stop_loss", 0) or 0
+            tp = row.get("take_profit", 0) or 0
             if symbol and qty > 0 and entry > 0:
+                # 若 DB 無 SL/TP，用固定百分比計算
+                if sl <= 0 or tp <= 0:
+                    if side == "long":
+                        sl = entry * (1 - fc.stop_loss_pct)
+                        tp = entry * (1 + fc.take_profit_pct)
+                    else:
+                        sl = entry * (1 + fc.stop_loss_pct)
+                        tp = entry * (1 - fc.take_profit_pct)
                 self.risk_manager.add_position(
                     symbol, side, qty, entry, leverage,
+                    stop_loss_price=sl, take_profit_price=tp,
                 )
         if rows:
             logger.info("已從 Supabase 恢復 %d 筆合約 %s 模式持倉", len(rows), mode)
@@ -241,6 +268,13 @@ class FuturesTradingBot:
                 self._record_margin_snapshot()
             except Exception:
                 logger.debug("記錄保證金快照失敗", exc_info=True)
+
+            # 定期持倉對齊（每 4 個 cycle）
+            if cycle % 4 == 0:
+                try:
+                    self._reconciler.reconcile_futures()
+                except Exception:
+                    logger.debug("定期合約持倉對齊失敗", exc_info=True)
 
             # 心跳
             uptime = int(time.monotonic() - self._start_time)
@@ -566,8 +600,9 @@ class FuturesTradingBot:
         if not order:
             return
 
-        fill_price = order.get("price", price)
-        fill_qty = order.get("filled", risk_output.quantity)
+        fill_price = order.get("price") or price
+        # 優先用 filled（實際成交量），若為 0 則用 amount（截斷後下單量）
+        fill_qty = order.get("filled") or order.get("amount") or risk_output.quantity
 
         # 記錄持倉
         self.risk_manager.add_position(
@@ -641,7 +676,7 @@ class FuturesTradingBot:
         if not order:
             return
 
-        exit_price = order.get("price", price)
+        exit_price = order.get("price") or price
         pnl = self.risk_manager.remove_position(symbol, side, exit_price)
 
         mode = self.settings.futures.mode.value

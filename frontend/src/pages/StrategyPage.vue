@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRealtimeTable } from '@/composables/useRealtime'
 import { useSupabase } from '@/composables/useSupabase'
 import { useBotStore } from '@/stores/bot'
@@ -9,7 +9,49 @@ import type { StrategyVerdict, LLMDecision } from '@/types'
 const bot = useBotStore()
 const supabase = useSupabase()
 
-const { rows: decisions, loading: dLoading } = useRealtimeTable<LLMDecision>('llm_decisions', { limit: 200 })
+// ─── Decisions: RPC 載入 + Realtime 即時更新 ─────────
+const decisions = ref<LLMDecision[]>([])
+const dLoading = ref(true)
+
+function decisionKey(d: LLMDecision) {
+  return `${d.symbol}:${d.market_type ?? 'spot'}:${d.action}`
+}
+
+async function fetchDecisions() {
+  dLoading.value = true
+  const { data } = await supabase.rpc('get_latest_decisions', { p_mode: bot.globalMode })
+  if (data) decisions.value = data as LLMDecision[]
+  dLoading.value = false
+}
+
+fetchDecisions()
+
+// 切換 mode 時重新載入
+watch(() => bot.globalMode, () => fetchDecisions())
+
+// Realtime: 新決策進來時，替換同 key 的舊卡片
+const rtChannel = supabase
+  .channel('rt:llm_decisions:strategy')
+  .on(
+    'postgres_changes',
+    { event: 'INSERT', schema: 'public', table: 'llm_decisions' },
+    (payload) => {
+      const newRow = payload.new as LLMDecision
+      if ((newRow.mode ?? 'live') !== bot.globalMode) return
+      const key = decisionKey(newRow)
+      decisions.value = [
+        newRow,
+        ...decisions.value.filter(d => decisionKey(d) !== key),
+      ]
+    },
+  )
+  .subscribe()
+
+onUnmounted(() => {
+  supabase.removeChannel(rtChannel)
+})
+
+// ─── Verdicts ────────────────────────────────────
 const { rows: verdicts, loading: vLoading } = useRealtimeTable<StrategyVerdict>('strategy_verdicts', { limit: 5000 })
 
 // 卡片 verdict 找不到時，fallback 按 cycle_id 單獨撈（像 Drawer 一樣）
@@ -28,42 +70,62 @@ async function fetchVerdictsByCycle(cycleId: string, symbol: string): Promise<St
   return result
 }
 
-const marketTab = ref<'spot' | 'futures'>('spot')
-
 onMounted(() => {
   if (!bot.spotPairs.length) bot.fetchConfigPairs()
 })
 
-const filteredDecisions = computed(() => {
-  return decisions.value.filter(d =>
-    (d.market_type ?? 'spot') === marketTab.value
-    && (d.mode ?? 'live') === bot.globalMode
-    && daysAgo(d.created_at) <= 3,
-  )
-})
+// ─── 分別過濾現貨 / 合約（RPC 已過濾 mode + 3 天）───
+const spotDecisions = computed(() =>
+  decisions.value.filter(d => (d.market_type ?? 'spot') === 'spot'),
+)
 
+const futuresDecisions = computed(() =>
+  decisions.value.filter(d => d.market_type === 'futures'),
+)
 
-const symbols = computed(() => {
+const spotSymbols = computed(() => {
   const set = new Set<string>()
-  for (const d of filteredDecisions.value) if (d.symbol) set.add(d.symbol)
+  for (const d of spotDecisions.value) if (d.symbol) set.add(d.symbol)
   return [...set].sort((a, b) => (bot.latestPrices[b] ?? 0) - (bot.latestPrices[a] ?? 0))
 })
 
-const actionOrder = ['BUY', 'HOLD', 'SELL'] as const
+const futuresSymbols = computed(() => {
+  const set = new Set<string>()
+  for (const d of futuresDecisions.value) if (d.symbol) set.add(d.symbol)
+  return [...set].sort((a, b) => (bot.latestPrices[b] ?? 0) - (bot.latestPrices[a] ?? 0))
+})
 
-/** Decisions for a symbol grouped by action, each max 2, sorted newest first */
-function getGroupedDecisions(symbol: string): { action: string; label: string; cards: LLMDecision[] }[] {
-  const labels: Record<string, string> = { BUY: '買入', HOLD: '觀望', SELL: '賣出' }
-  return actionOrder.map(action => ({
+// ─── 按 action 分組 ───────────────────────────────
+const spotActionOrder = ['BUY', 'HOLD', 'SELL'] as const
+const futuresActionOrder = ['BUY', 'COVER', 'HOLD', 'SELL', 'SHORT'] as const
+const spotLabelsMap: Record<string, string> = { BUY: '買入', HOLD: '觀望', SELL: '賣出' }
+const futuresLabelsMap: Record<string, string> = { BUY: '做多', COVER: '平空', HOLD: '觀望', SELL: '平多', SHORT: '做空' }
+
+type GroupedColumn = { action: string; label: string; cards: LLMDecision[] }
+
+function getSpotGrouped(symbol: string): GroupedColumn[] {
+  return spotActionOrder.map(action => ({
     action,
-    label: labels[action] ?? action,
-    cards: filteredDecisions.value
+    label: spotLabelsMap[action] ?? action,
+    cards: spotDecisions.value
       .filter(d => d.symbol === symbol && d.action === action)
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       .slice(0, 1),
   }))
 }
 
+function getFuturesGrouped(symbol: string): GroupedColumn[] {
+  return futuresActionOrder.map(action => ({
+    action,
+    label: futuresLabelsMap[action] ?? action,
+    cards: futuresDecisions.value
+      .filter(d => d.symbol === symbol && d.action === action)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(0, 1),
+  }))
+}
+
+// ─── Strategies ───────────────────────────────────
 const allStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'macd_momentum', 'vwap_reversion', 'ema_ribbon', 'tia_orderflow']
 const strategyLabel: Record<string, string> = {
   sma_crossover: 'SMA 交叉',
@@ -77,18 +139,14 @@ const strategyLabel: Record<string, string> = {
 
 type VerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
 
-/** Per strategy, pick the verdict with the highest confidence; always show all strategies.
- *  先從已載入的 verdicts 中找，找不到就觸發 fallback 查詢。 */
 function getVerdictSlots(decision: LLMDecision): VerdictSlot[] {
   let matched = verdicts.value.filter(v => v.cycle_id === decision.cycle_id && v.symbol === decision.symbol)
 
-  // Fallback: 從 cache 或觸發查詢
   if (!matched.length) {
     const key = `${decision.cycle_id}:${decision.symbol}`
     if (verdictCache.has(key)) {
       matched = verdictCache.get(key)!
     } else {
-      // 觸發非同步查詢，下次 render 會從 cache 拿到
       fetchVerdictsByCycle(decision.cycle_id, decision.symbol).then(data => {
         if (data.length) verdicts.value = [...verdicts.value, ...data]
       })
@@ -103,6 +161,15 @@ function getVerdictSlots(decision: LLMDecision): VerdictSlot[] {
   return allStrategies.map(s => ({ strategy: s, verdict: best.get(s) ?? null }))
 }
 
+function nonHoldSlots(decision: LLMDecision): VerdictSlot[] {
+  return getVerdictSlots(decision).filter(s => s.verdict && s.verdict.signal !== 'HOLD')
+}
+
+function holdCount(decision: LLMDecision): number {
+  return getVerdictSlots(decision).filter(s => !s.verdict || s.verdict.signal === 'HOLD').length
+}
+
+// ─── UI helpers ───────────────────────────────────
 function timeAgo(ts: string): string {
   const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000)
   if (diff < 60) return `${diff}秒前`
@@ -112,8 +179,8 @@ function timeAgo(ts: string): string {
 }
 
 function signalBadgeClass(signal: string) {
-  if (signal === 'BUY') return 'text-(--color-success)'
-  if (signal === 'SELL') return 'text-(--color-danger)'
+  if (signal === 'BUY' || signal === 'COVER') return 'text-(--color-success)'
+  if (signal === 'SELL' || signal === 'SHORT') return 'text-(--color-danger)'
   return 'text-(--color-text-muted)'
 }
 
@@ -121,7 +188,7 @@ function verdictBgStyle(signal: string, confidence: number): Record<string, stri
   const bg = 'var(--color-bg-secondary)'
   if (confidence <= 0 || signal === 'HOLD') return { background: bg }
   const pct = Math.round(confidence * 100)
-  const color = signal === 'BUY' ? 'var(--color-success)' : 'var(--color-danger)'
+  const color = (signal === 'BUY' || signal === 'COVER') ? 'var(--color-success)' : 'var(--color-danger)'
   return {
     background: `linear-gradient(to right, color-mix(in srgb, ${color} 25%, transparent) 0%, color-mix(in srgb, ${color} 12%, transparent) ${pct}%, transparent ${pct}%) ${bg}`,
   }
@@ -130,30 +197,28 @@ function verdictBgStyle(signal: string, confidence: number): Record<string, stri
 function signalLabel(signal: string) {
   if (signal === 'BUY') return '買入'
   if (signal === 'SELL') return '賣出'
+  if (signal === 'SHORT') return '做空'
+  if (signal === 'COVER') return '平空'
   if (signal === 'HOLD') return '觀望'
   return signal
 }
 
 function actionBadgeClass(action: string) {
-  if (action === 'BUY') return 'badge-buy'
-  if (action === 'SELL') return 'badge-sell'
+  if (action === 'BUY' || action === 'COVER') return 'badge-buy'
+  if (action === 'SELL' || action === 'SHORT') return 'badge-sell'
   return 'badge-hold'
 }
 
 function actionDotColor(action: string) {
-  if (action === 'BUY') return 'var(--color-success)'
-  if (action === 'SELL') return 'var(--color-danger)'
+  if (action === 'BUY' || action === 'COVER') return 'var(--color-success)'
+  if (action === 'SELL' || action === 'SHORT') return 'var(--color-danger)'
   return 'var(--color-text-secondary)'
 }
 
-/** Count decisions by action for column header stats */
-function actionCounts(symbol: string): { buy: number; sell: number; hold: number } {
-  const decs = filteredDecisions.value.filter(d => d.symbol === symbol)
-  return {
-    buy: decs.filter(d => d.action === 'BUY').length,
-    sell: decs.filter(d => d.action === 'SELL').length,
-    hold: decs.filter(d => d.action === 'HOLD').length,
-  }
+function futuresActionLabel(action: string): string | null {
+  if (action === 'SHORT') return '做空'
+  if (action === 'COVER') return '平空'
+  return null
 }
 
 function daysAgo(ts: string): number {
@@ -177,115 +242,290 @@ function isRecent(ts: string): boolean {
   return Date.now() - new Date(ts).getTime() < 4 * 3600000
 }
 
+/** 策略短標籤（長條圖 tooltip 用） */
+const strategyShort: Record<string, string> = {
+  sma_crossover: 'SMA',
+  rsi_oversold: 'RSI',
+  bollinger_breakout: 'BOLL',
+  macd_momentum: 'MACD',
+  vwap_reversion: 'VWAP',
+  ema_ribbon: 'EMA',
+  tia_orderflow: 'OFlow',
+}
+
+function barColor(signal: string): string {
+  if (signal === 'BUY' || signal === 'COVER') return 'var(--color-success)'
+  if (signal === 'SELL' || signal === 'SHORT') return 'var(--color-danger)'
+  return 'var(--color-text-secondary)'
+}
+
 const drawerDecision = ref<LLMDecision | null>(null)
 </script>
 
 <template>
   <div class="p-4 md:p-6 md:pb-0 flex flex-col gap-4 md:gap-6 md:h-[calc(100vh)] md:overflow-hidden">
     <!-- Header -->
-    <div class="flex items-center justify-between shrink-0">
+    <div class="shrink-0">
       <h2 class="text-2xl md:text-3xl font-bold">策略</h2>
-      <div class="flex items-center gap-3">
-        <span class="text-sm text-(--color-text-muted)">{{ filteredDecisions.length }} 筆決策</span>
-        <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
-          <button
-            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-            :class="marketTab === 'spot'
-              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="marketTab = 'spot'"
-          >現貨</button>
-          <button
-            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-            :class="marketTab === 'futures'
-              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="marketTab = 'futures'"
-          >合約</button>
-        </div>
-      </div>
     </div>
 
     <!-- Loading -->
     <div v-if="dLoading || vLoading" class="text-base text-(--color-text-secondary)">載入中...</div>
-    <div v-else-if="!symbols.length" class="text-base text-(--color-text-secondary)">無記錄</div>
+    <div v-else-if="!spotSymbols.length && !futuresSymbols.length" class="text-base text-(--color-text-secondary)">無記錄</div>
 
-    <!-- Trello-style board -->
-    <div v-else class="min-h-0 md:flex-1 overflow-x-auto overflow-y-hidden">
-      <div class="flex gap-3 h-full items-start">
-        <!-- Column per symbol -->
-        <div
-          v-for="sym in symbols"
-          :key="sym"
-          class="kanban-col flex flex-col shrink-0 w-[280px] max-h-full rounded-xl bg-(--color-bg-card) border border-(--color-border)"
-        >
-          <!-- Column header -->
-          <div class="px-3 pt-3 pb-2 shrink-0">
-            <div class="flex items-center justify-between">
-              <span class="font-bold text-sm text-(--color-text-primary)">{{ sym.replace('/USDT', '') }}</span>
-              <span class="text-xs text-(--color-text-muted) tabular-nums">${{ bot.latestPrices[sym]?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '-' }}</span>
-            </div>
-          </div>
+    <!-- Content: vertically scrollable -->
+    <div v-else class="flex flex-col gap-6 min-h-0 md:flex-1 md:overflow-auto pb-4">
 
-          <!-- Cards grouped by action: BUY → HOLD → SELL -->
-          <div class="flex flex-col gap-1.5 px-2 pb-2 overflow-y-auto min-h-0 flex-1">
-            <template v-for="group in getGroupedDecisions(sym)" :key="group.action">
-              <!-- Real cards -->
-              <div
-                v-for="d in group.cards"
-                :key="d.id"
-                class="kanban-card bg-(--color-bg-card) border border-(--color-border) rounded-lg p-2.5 min-h-[240px] cursor-pointer hover:border-(--color-accent)/50 transition-colors"
-                :style="cardStyle(d)"
-                @click="drawerDecision = d"
-              >
-                <!-- Top: action dot + badge + time -->
-                <div class="flex items-center justify-between mb-1.5">
-                  <div class="flex items-center gap-1.5">
-                    <div class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: isRecent(d.created_at) ? 'var(--color-warning)' : actionDotColor(d.action) }"></div>
-                    <span class="text-xs font-bold" :class="isRecent(d.created_at) ? 'text-(--color-warning)' : actionBadgeClass(d.action)">{{ signalLabel(d.action) }}</span>
-                    <span v-if="d.executed === false" class="text-[9px] px-1 py-px rounded bg-(--color-warning-subtle) text-(--color-warning) font-medium">攔截</span>
-                  </div>
-                  <span class="text-[11px] text-(--color-text-muted)">{{ timeAgo(d.created_at) }}</span>
-                </div>
+      <!-- ===== Spot Section ===== -->
+      <section v-if="spotSymbols.length">
+        <h3 class="text-lg font-semibold text-(--color-text-primary) mb-3">現貨</h3>
 
-                <!-- Reasoning preview -->
-                <div class="text-xs text-(--color-text-secondary) leading-relaxed line-clamp-3 mb-2">{{ d.reasoning }}</div>
-
-                <!-- Strategy verdict chips -->
-                <div class="flex flex-col gap-1">
-                  <div
-                    v-for="slot in getVerdictSlots(d)"
-                    :key="slot.strategy"
-                    class="flex items-center justify-between gap-1 rounded px-1.5 py-px"
-                    :class="{ 'opacity-35': !slot.verdict || slot.verdict.signal === 'HOLD' }"
-                    :style="slot.verdict ? verdictBgStyle(slot.verdict.signal, slot.verdict.confidence) : { background: 'var(--color-bg-secondary)' }"
-                  >
-                    <div class="flex items-center gap-1 min-w-0">
-                      <span class="text-[8px] text-(--color-text-muted) truncate">{{ strategyLabel[slot.strategy] || slot.strategy }}</span>
-                      <span v-if="slot.verdict?.timeframe" class="text-[8px] text-(--color-text-muted) shrink-0">{{ slot.verdict.timeframe }}</span>
-                    </div>
-                    <span v-if="slot.verdict" class="text-[8px] font-bold shrink-0" :class="signalBadgeClass(slot.verdict.signal)">{{ (slot.verdict.confidence * 100).toFixed(0) }}%</span>
-                    <span v-else class="text-[8px] text-(--color-text-muted) shrink-0">-</span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Ghost placeholder when this action has no card -->
-              <div
-                v-if="!group.cards.length"
-                class="border border-dashed rounded-lg p-2.5 min-h-[240px] flex items-center"
-                :style="{ borderColor: `color-mix(in srgb, ${actionDotColor(group.action)} 30%, transparent)` }"
-              >
-                <div class="flex items-center gap-1.5">
-                  <div class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: actionDotColor(group.action), opacity: 0.4 }"></div>
-                  <span class="text-xs opacity-40" :class="actionBadgeClass(group.action)">{{ group.label }}</span>
-                  <span class="text-[11px] text-(--color-text-muted) opacity-30 ml-auto">無紀錄</span>
-                </div>
-              </div>
-            </template>
+        <!-- Column headers (desktop) -->
+        <div class="hidden md:grid grid-cols-[100px_2fr_1fr_2fr] gap-0 mb-1 px-1">
+          <div></div>
+          <div v-for="action in spotActionOrder" :key="action" class="flex items-center gap-1 px-2">
+            <div class="w-1.5 h-1.5 rounded-full" :style="{ backgroundColor: actionDotColor(action) }"></div>
+            <span class="text-[10px] font-semibold uppercase tracking-wide" :class="actionBadgeClass(action)">{{ spotLabelsMap[action] }}</span>
           </div>
         </div>
-      </div>
+
+        <div class="flex flex-col gap-2">
+          <div
+            v-for="sym in spotSymbols"
+            :key="sym"
+            class="symbol-row bg-(--color-bg-card) border border-(--color-border) rounded-xl overflow-hidden"
+          >
+            <!-- Desktop: 2:1:2 ratio -->
+            <div class="hidden md:grid grid-cols-[100px_2fr_1fr_2fr] gap-0 min-h-[80px]">
+              <!-- Symbol label -->
+              <div class="flex flex-col justify-center px-3 py-2 border-r border-(--color-border)/50">
+                <span class="font-bold text-sm text-(--color-text-primary)">{{ sym.replace('/USDT', '') }}</span>
+                <span class="text-xs text-(--color-text-muted) tabular-nums">${{ bot.latestPrices[sym]?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '-' }}</span>
+              </div>
+
+              <!-- 3 action columns (2:1:2 ratio) -->
+              <template v-for="(group, gi) in getSpotGrouped(sym)" :key="group.action">
+                <div
+                  class="px-1.5 py-2"
+                  :class="{ 'border-r border-(--color-border)/30': gi < 2 }"
+                >
+                  <!-- Card: bars as background, text overlay -->
+                  <div
+                    v-for="d in group.cards"
+                    :key="d.id"
+                    class="decision-card relative border border-(--color-border) rounded-lg cursor-pointer hover:border-(--color-accent)/50 transition-colors h-[115px] overflow-hidden"
+                    :style="cardStyle(d)"
+                    @click="drawerDecision = d"
+                  >
+                    <!-- Background bars -->
+                    <div class="absolute inset-x-0 bottom-0 flex items-end justify-center gap-[3px] h-full px-2 pb-1 pointer-events-none">
+                      <div
+                        v-for="slot in getVerdictSlots(d)"
+                        :key="slot.strategy"
+                        class="flex-1 rounded-t-sm transition-all"
+                        :style="{
+                          height: slot.verdict ? `${Math.max(slot.verdict.confidence * 100, 8)}%` : '8%',
+                          backgroundColor: slot.verdict ? barColor(slot.verdict.signal) : 'var(--color-border)',
+                          opacity: slot.verdict ? '0.10' : '0.04',
+                        }"
+                        :title="`${strategyShort[slot.strategy] ?? slot.strategy}: ${slot.verdict ? (slot.verdict.confidence * 100).toFixed(0) + '% ' + signalLabel(slot.verdict.signal) : '無資料'}`"
+                      ></div>
+                    </div>
+                    <!-- Time badge (absolute top-right) -->
+                    <span class="absolute top-0 right-0 text-[10px] text-(--color-text-muted) bg-(--color-bg-card)/80 px-1 py-px rounded">{{ timeAgo(d.created_at) }}</span>
+                    <!-- Text overlay -->
+                    <div class="relative z-10 p-2 h-full flex flex-col overflow-hidden">
+                      <span v-if="d.executed === false" class="text-[9px] px-1 py-px rounded bg-(--color-warning-subtle) text-(--color-warning) font-medium self-start mb-1 shrink-0">攔截</span>
+                      <div class="text-xs text-(--color-text-secondary) leading-relaxed flex-1">{{ d.reasoning }}</div>
+                    </div>
+                  </div>
+
+                  <!-- Ghost -->
+                  <div
+                    v-if="!group.cards.length"
+                    class="rounded-lg p-2 border border-dashed flex items-center justify-center h-[115px]"
+                    :style="{ borderColor: `color-mix(in srgb, ${actionDotColor(group.action)} 20%, transparent)` }"
+                  >
+                    <span class="text-[11px] text-(--color-text-muted) opacity-30">無紀錄</span>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <!-- Mobile -->
+            <div class="md:hidden">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-(--color-border)/50">
+                <span class="font-bold text-sm text-(--color-text-primary)">{{ sym.replace('/USDT', '') }}</span>
+                <span class="text-xs text-(--color-text-muted) tabular-nums">${{ bot.latestPrices[sym]?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '-' }}</span>
+              </div>
+              <div class="grid grid-cols-3">
+                <template v-for="group in getSpotGrouped(sym)" :key="group.action">
+                  <div class="px-1.5 py-2" :class="{ 'border-r border-(--color-border)/30': group.action !== 'SELL' }">
+                    <div class="flex items-center gap-1 mb-1 px-0.5">
+                      <div class="w-1.5 h-1.5 rounded-full" :style="{ backgroundColor: actionDotColor(group.action) }"></div>
+                      <span class="text-[9px] font-semibold" :class="actionBadgeClass(group.action)">{{ group.label }}</span>
+                    </div>
+                    <div
+                      v-for="d in group.cards"
+                      :key="d.id"
+                      class="decision-card relative border border-(--color-border) rounded-lg cursor-pointer h-[100px] overflow-hidden"
+                      :style="cardStyle(d)"
+                      @click="drawerDecision = d"
+                    >
+                      <div class="absolute inset-x-0 bottom-0 flex items-end justify-center gap-[3px] h-full px-1.5 pb-0.5 pointer-events-none">
+                        <div
+                          v-for="slot in getVerdictSlots(d)"
+                          :key="slot.strategy"
+                          class="flex-1 rounded-t-sm"
+                          :style="{
+                            height: slot.verdict ? `${Math.max(slot.verdict.confidence * 100, 8)}%` : '8%',
+                            backgroundColor: slot.verdict ? barColor(slot.verdict.signal) : 'var(--color-border)',
+                            opacity: slot.verdict ? '0.10' : '0.04',
+                          }"
+                        ></div>
+                      </div>
+                      <span class="absolute top-0 right-0 text-[9px] text-(--color-text-muted) bg-(--color-bg-card)/80 px-1 py-px rounded">{{ timeAgo(d.created_at) }}</span>
+                      <div class="relative z-10 p-1.5 h-full flex flex-col overflow-hidden">
+                        <div class="text-[11px] text-(--color-text-secondary) leading-relaxed line-clamp-4 flex-1">{{ d.reasoning }}</div>
+                      </div>
+                    </div>
+                    <div
+                      v-if="!group.cards.length"
+                      class="rounded-lg p-1.5 border border-dashed flex items-center justify-center h-[100px]"
+                      :style="{ borderColor: `color-mix(in srgb, ${actionDotColor(group.action)} 20%, transparent)` }"
+                    >
+                      <span class="text-[10px] text-(--color-text-muted) opacity-30">-</span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Futures Section (5 columns) ===== -->
+      <section v-if="futuresSymbols.length">
+        <h3 class="text-lg font-semibold text-(--color-text-primary) mb-3">合約</h3>
+
+        <!-- Column headers (desktop) -->
+        <div class="hidden md:grid grid-cols-[100px_1fr_1fr_1fr_1fr_1fr] gap-0 mb-1 px-1">
+          <div></div>
+          <div v-for="action in futuresActionOrder" :key="action" class="flex items-center gap-1 px-2">
+            <div class="w-1.5 h-1.5 rounded-full" :style="{ backgroundColor: actionDotColor(action) }"></div>
+            <span class="text-[10px] font-semibold uppercase tracking-wide" :class="actionBadgeClass(action)">{{ futuresLabelsMap[action] }}</span>
+          </div>
+        </div>
+
+        <div class="flex flex-col gap-2">
+          <div
+            v-for="sym in futuresSymbols"
+            :key="sym"
+            class="symbol-row bg-(--color-bg-card) border border-(--color-border) rounded-xl overflow-hidden"
+          >
+            <!-- Desktop: 5 action columns -->
+            <div class="hidden md:grid grid-cols-[100px_1fr_1fr_1fr_1fr_1fr] gap-0 min-h-[80px]">
+              <div class="flex flex-col justify-center px-3 py-2 border-r border-(--color-border)/50">
+                <span class="font-bold text-sm text-(--color-text-primary)">{{ sym.replace('/USDT', '') }}</span>
+                <span class="text-[11px] text-(--color-text-muted) tabular-nums">${{ bot.latestPrices[sym]?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '-' }}</span>
+              </div>
+
+              <template v-for="(group, gi) in getFuturesGrouped(sym)" :key="group.action">
+                <div class="px-1.5 py-2" :class="{ 'border-r border-(--color-border)/30': gi < 4 }">
+                  <!-- Card: bars as background, text overlay -->
+                  <div
+                    v-if="group.cards.length"
+                    v-for="d in group.cards"
+                    :key="d.id"
+                    class="decision-card relative border border-(--color-border) rounded-lg cursor-pointer hover:border-(--color-accent)/50 transition-colors h-[115px] overflow-hidden"
+                    :style="cardStyle(d)"
+                    @click="drawerDecision = d"
+                  >
+                    <div class="absolute inset-x-0 bottom-0 flex items-end justify-center gap-[3px] h-full px-1.5 pb-1 pointer-events-none">
+                      <div
+                        v-for="slot in getVerdictSlots(d)"
+                        :key="slot.strategy"
+                        class="flex-1 rounded-t-sm transition-all"
+                        :style="{
+                          height: slot.verdict ? `${Math.max(slot.verdict.confidence * 100, 8)}%` : '8%',
+                          backgroundColor: slot.verdict ? barColor(slot.verdict.signal) : 'var(--color-border)',
+                          opacity: slot.verdict ? '0.10' : '0.04',
+                        }"
+                        :title="`${strategyShort[slot.strategy] ?? slot.strategy}: ${slot.verdict ? (slot.verdict.confidence * 100).toFixed(0) + '% ' + signalLabel(slot.verdict.signal) : '無資料'}`"
+                      ></div>
+                    </div>
+                    <span class="absolute top-0 right-0 text-[10px] text-(--color-text-muted) bg-(--color-bg-card)/80 px-1 py-px rounded">{{ timeAgo(d.created_at) }}</span>
+                    <div class="relative z-10 p-2 h-full flex flex-col overflow-hidden">
+                      <span v-if="d.executed === false" class="text-[9px] px-1 py-px rounded bg-(--color-warning-subtle) text-(--color-warning) font-medium self-start mb-1 shrink-0">攔截</span>
+                      <div class="text-xs text-(--color-text-secondary) leading-relaxed flex-1">{{ d.reasoning }}</div>
+                    </div>
+                  </div>
+                  <!-- Ghost -->
+                  <div
+                    v-else
+                    class="rounded-lg border border-dashed flex items-center justify-center h-[115px]"
+                    :style="{ borderColor: `color-mix(in srgb, ${actionDotColor(group.action)} 20%, transparent)` }"
+                  >
+                    <span class="text-[10px] text-(--color-text-muted) opacity-30">-</span>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <!-- Mobile: 5 columns horizontally scrollable -->
+            <div class="md:hidden">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-(--color-border)/50">
+                <span class="font-bold text-sm text-(--color-text-primary)">{{ sym.replace('/USDT', '') }}</span>
+                <span class="text-xs text-(--color-text-muted) tabular-nums">${{ bot.latestPrices[sym]?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '-' }}</span>
+              </div>
+              <div class="overflow-x-auto">
+                <div class="grid grid-cols-5 gap-0" style="min-width: 500px">
+                  <template v-for="(group, gi) in getFuturesGrouped(sym)" :key="group.action">
+                    <div class="px-1.5 py-2" :class="{ 'border-r border-(--color-border)/30': gi < 4 }">
+                      <div class="flex items-center gap-1 mb-1 px-0.5">
+                        <div class="w-1.5 h-1.5 rounded-full" :style="{ backgroundColor: actionDotColor(group.action) }"></div>
+                        <span class="text-[9px] font-semibold" :class="actionBadgeClass(group.action)">{{ group.label }}</span>
+                      </div>
+                      <div
+                        v-if="group.cards.length"
+                        v-for="d in group.cards"
+                        :key="d.id"
+                        class="decision-card relative border border-(--color-border) rounded-lg cursor-pointer h-[100px] overflow-hidden"
+                        :style="cardStyle(d)"
+                        @click="drawerDecision = d"
+                      >
+                        <div class="absolute inset-x-0 bottom-0 flex items-end justify-center gap-[3px] h-full px-1.5 pb-0.5 pointer-events-none">
+                          <div
+                            v-for="slot in getVerdictSlots(d)"
+                            :key="slot.strategy"
+                            class="flex-1 rounded-t-sm"
+                            :style="{
+                              height: slot.verdict ? `${Math.max(slot.verdict.confidence * 100, 8)}%` : '8%',
+                              backgroundColor: slot.verdict ? barColor(slot.verdict.signal) : 'var(--color-border)',
+                              opacity: slot.verdict ? '0.10' : '0.04',
+                            }"
+                          ></div>
+                        </div>
+                        <span class="absolute top-0 right-0 text-[9px] text-(--color-text-muted) bg-(--color-bg-card)/80 px-1 py-px rounded">{{ timeAgo(d.created_at) }}</span>
+                        <div class="relative z-10 p-1.5 h-full flex flex-col overflow-hidden">
+                          <div class="text-[11px] text-(--color-text-secondary) leading-relaxed line-clamp-4 flex-1">{{ d.reasoning }}</div>
+                        </div>
+                      </div>
+                      <div
+                        v-else
+                        class="rounded-lg p-1.5 border border-dashed flex items-center justify-center h-[100px]"
+                        :style="{ borderColor: `color-mix(in srgb, ${actionDotColor(group.action)} 20%, transparent)` }"
+                      >
+                        <span class="text-[9px] text-(--color-text-muted) opacity-30">-</span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <DecisionDrawer :decision="drawerDecision" @close="drawerDecision = null" />
@@ -293,15 +533,16 @@ const drawerDecision = ref<LLMDecision | null>(null)
 </template>
 
 <style scoped>
-.kanban-col {
-  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.08);
+.symbol-row {
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.06);
 }
 
-.kanban-card {
-  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+.decision-card {
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+  text-shadow: 0 0 1px #999;
 }
-.kanban-card:hover {
-  box-shadow: 0 2px 6px 0 rgb(0 0 0 / 0.08);
+.decision-card:hover {
+  box-shadow: 0 2px 4px 0 rgb(0 0 0 / 0.06);
 }
 
 .badge-buy {
@@ -313,5 +554,4 @@ const drawerDecision = ref<LLMDecision | null>(null)
 .badge-hold {
   color: var(--color-text-secondary);
 }
-
 </style>

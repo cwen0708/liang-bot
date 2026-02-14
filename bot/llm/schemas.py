@@ -57,8 +57,12 @@ class LLMDecision(BaseModel):
 
     action: str = Field(description="BUY / SELL / HOLD / SHORT / COVER")
     confidence: float = Field(ge=0.0, le=1.0, description="決策信心度")
-    stop_loss_pct: float = Field(default=0.03, description="建議停損百分比")
-    take_profit_pct: float = Field(default=0.06, description="建議停利百分比")
+    entry_price: float = Field(default=0.0, description="建議進場價位")
+    stop_loss: float = Field(default=0.0, description="具體停損價位")
+    take_profit: float = Field(default=0.0, description="具體停利價位")
+    # 保留舊欄位向後相容
+    stop_loss_pct: float = Field(default=0.0, description="[已棄用] 停損百分比")
+    take_profit_pct: float = Field(default=0.0, description="[已棄用] 停利百分比")
     reasoning: str = Field(default="", description="決策推理過程")
     position_size_pct: float = Field(default=0.02, description="建議倉位佔比")
     horizon: str = Field(default="medium", description="持倉週期: short/medium/long")

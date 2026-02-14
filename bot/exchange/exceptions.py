@@ -19,3 +19,7 @@ class RateLimitError(ExchangeError):
 
 class AuthenticationError(ExchangeError):
     """API 認證失敗。"""
+
+
+class ReduceOnlyError(ExchangeError):
+    """ReduceOnly 訂單被拒絕（交易所無對應持倉）。"""

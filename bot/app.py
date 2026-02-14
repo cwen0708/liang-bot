@@ -49,6 +49,7 @@ from bot.strategy.macd_momentum import MACDMomentumStrategy
 from bot.strategy.rsi_oversold import RSIOversoldStrategy
 from bot.strategy.sma_crossover import SMACrossoverStrategy
 from bot.strategy.vwap_reversion import VWAPReversionStrategy
+from bot.reconciliation import PositionReconciler
 from bot.strategy.tia_orderflow import TiaBTCOrderFlowStrategy
 
 logger = get_logger("app")
@@ -94,6 +95,9 @@ class DecisionResult:
     horizon: str = "medium"
     llm_override: bool = False
     llm_size_pct: float = 0.0
+    entry_price: float = 0.0
+    stop_loss: float = 0.0
+    take_profit: float = 0.0
 
 
 # ════════════════════════════════════════════════════════════
@@ -164,6 +168,9 @@ def make_llm_decision(
                     decision.reasoning, model_name,
                     cycle_id, market_type=market_type,
                     mode=mode,
+                    entry_price=decision.entry_price,
+                    stop_loss=decision.stop_loss,
+                    take_profit=decision.take_profit,
                 )
             else:
                 reject = f"無策略支持且信心不足 ({decision.confidence:.2f} < 0.7)"
@@ -177,6 +184,9 @@ def make_llm_decision(
                     cycle_id, market_type=market_type,
                     executed=False, reject_reason=reject,
                     mode=mode,
+                    entry_price=decision.entry_price,
+                    stop_loss=decision.stop_loss,
+                    take_profit=decision.take_profit,
                 )
                 return DecisionResult(signal=Signal.HOLD, confidence=0.0)
         else:
@@ -185,6 +195,9 @@ def make_llm_decision(
                 decision.reasoning, model_name,
                 cycle_id, market_type=market_type,
                 mode=mode,
+                entry_price=decision.entry_price,
+                stop_loss=decision.stop_loss,
+                take_profit=decision.take_profit,
             )
 
         return DecisionResult(
@@ -193,6 +206,9 @@ def make_llm_decision(
             horizon=horizon,
             llm_override=llm_override,
             llm_size_pct=decision.position_size_pct,
+            entry_price=decision.entry_price,
+            stop_loss=decision.stop_loss,
+            take_profit=decision.take_profit,
         )
     except Exception as e:
         logger.warning("%sLLM 決策失敗 → HOLD: %s", _L2, e)
@@ -340,6 +356,20 @@ class TradingBot:
         self._futures_handler: FuturesHandler | None = None
         if self._futures_enabled:
             self._init_futures()
+
+        # ── 啟動對齊：交易所 vs RiskManager vs Supabase ──
+        self._reconciler = PositionReconciler(
+            spot_exchange=self.exchange,
+            futures_exchange=self._futures_exchange,
+            spot_risk=self.risk_manager,
+            futures_risk=self._futures_risk,
+            db=self._db,
+            settings=self.settings,
+        )
+        try:
+            self._reconciler.reconcile_all(label="啟動")
+        except Exception:
+            logger.exception("啟動對齊失敗，繼續運行")
 
         # ── 借貸監控（永遠使用生產 client）──
         self._loan_guardian: LoanGuardian | None = None
@@ -573,6 +603,13 @@ class TradingBot:
 
             # 從 Supabase 載入最新配置（若版本已變更）
             self._reload_config_if_changed()
+
+            # ── 定期持倉對齊（每 4 個 cycle ≈ 1 小時）──
+            if cycle % 4 == 0:
+                try:
+                    self._reconciler.reconcile_all(label=f"定期 cycle#{cycle}")
+                except Exception:
+                    logger.debug("定期持倉對齊失敗", exc_info=True)
 
             # ── 交易對處理（支援並行）──
             if self._parallel:

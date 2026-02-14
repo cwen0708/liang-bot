@@ -161,6 +161,8 @@ def summarize_risk_metrics(
     if not metrics.passes_min_rr or metrics.reason:
         lines.append(f"\n⚠️ **風控警告**: {metrics.reason}")
 
+    lines.append("\n> 以上停損停利為系統預計算參考值，請根據分析調整並在 JSON 中回傳具體價位。")
+
     return "\n".join(lines)
 
 

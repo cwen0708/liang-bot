@@ -298,6 +298,8 @@ class SpotHandler:
                 final_signal, symbol, current_price, usdt_balance,
                 horizon=horizon,
                 llm_size_pct=llm_size_pct,
+                llm_stop_loss=decision_result.stop_loss,
+                llm_take_profit=decision_result.take_profit,
             )
             if not risk_output.approved:
                 logger.info("%s[現貨] 風控拒絕: %s", _L2, risk_output.reason)

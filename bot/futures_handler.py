@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from bot.config.constants import DataFeedType, TF_MINUTES
+from bot.exchange.exceptions import ReduceOnlyError
 from bot.logging_config import get_logger
 from bot.llm.schemas import PortfolioState, PositionInfo
 from bot.strategy.router import StrategyRouter
@@ -304,6 +305,8 @@ class FuturesHandler:
         risk_output = self._risk.evaluate(
             signal, symbol, price, available, margin_ratio, ohlcv=ohlcv,
             horizon=decision.horizon, llm_size_pct=llm_size_pct,
+            llm_stop_loss=decision.stop_loss,
+            llm_take_profit=decision.take_profit,
         )
         if not risk_output.approved:
             logger.info("%s[合約] 風控拒絕: %s", _L2, risk_output.reason)
@@ -378,7 +381,20 @@ class FuturesHandler:
         if not risk_output.approved:
             return
 
-        order = self._executor.execute(close_signal, symbol, risk_output)
+        try:
+            order = self._executor.execute(close_signal, symbol, risk_output)
+        except ReduceOnlyError:
+            # 交易所無此持倉（testnet 重啟 / 幻影持倉），自動清除
+            logger.warning(
+                "%s[合約] %s %s倉 ReduceOnly 被拒 — 交易所無此持倉，自動清除",
+                _L2, symbol, side,
+            )
+            self._risk.remove_position(symbol, side, price)
+            self._db.delete_position(
+                symbol, mode=fc.mode.value, market_type="futures", side=side,
+            )
+            return
+
         if not order:
             return
 

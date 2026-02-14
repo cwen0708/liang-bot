@@ -36,16 +36,27 @@ onMounted(() => {
   if (!bot.spotPairs.length) bot.fetchConfigPairs()
 })
 
-// 依設定檔交易對篩選
-const filteredPrices = computed(() => {
-  const pairs = marketTab.value === 'spot' ? bot.spotPairs : bot.futuresPairs
-  if (!pairs.length) return bot.latestPrices
-  const result: Record<string, number> = {}
-  for (const p of pairs) {
-    if (bot.latestPrices[p] != null) result[p] = bot.latestPrices[p]
+// 合併現貨 + 合約交易對列表
+interface PairItem {
+  symbol: string
+  market: 'spot' | 'futures'
+  price: number | null
+}
+const allPairs = computed<PairItem[]>(() => {
+  const items: PairItem[] = []
+  for (const s of bot.spotPairs) {
+    items.push({ symbol: s, market: 'spot', price: bot.latestPrices[s] ?? null })
   }
-  return result
+  for (const s of bot.futuresPairs) {
+    items.push({ symbol: s, market: 'futures', price: bot.latestPrices[s] ?? null })
+  }
+  return items
 })
+
+function selectPair(item: PairItem) {
+  selectedSymbol.value = item.symbol
+  marketTab.value = item.market
+}
 
 // Binance API base URLs
 const restBase = computed(() =>
@@ -338,13 +349,6 @@ watch(filterMode, () => {
 
 watch(() => bot.positions, () => updatePositionLines(), { deep: true })
 
-// Market tab change → select first pair of that tab
-watch(marketTab, () => {
-  const pairs = marketTab.value === 'spot' ? bot.spotPairs : bot.futuresPairs
-  if (pairs.length && !pairs.includes(selectedSymbol.value)) {
-    selectedSymbol.value = pairs[0]!
-  }
-})
 
 watch(isDark, async () => {
   await nextTick()
@@ -354,25 +358,7 @@ watch(isDark, async () => {
 
 <template>
   <div class="p-4 md:p-6 space-y-4 md:space-y-6">
-    <div class="flex items-center justify-between gap-2">
-      <h2 class="text-2xl md:text-3xl font-bold">行情</h2>
-      <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
-        <button
-          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-          :class="marketTab === 'spot'
-            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-          @click="marketTab = 'spot'"
-        >現貨</button>
-        <button
-          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-          :class="marketTab === 'futures'
-            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-          @click="marketTab = 'futures'"
-        >合約</button>
-      </div>
-    </div>
+    <h2 class="text-2xl md:text-3xl font-bold">行情</h2>
 
     <!-- Chart: Binance live kline -->
     <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2 md:p-4 shadow-sm dark:shadow-none">
@@ -390,16 +376,25 @@ watch(isDark, async () => {
       <div ref="chartContainer" class="w-full" />
     </div>
 
-    <!-- Price Cards -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-      <div v-for="(price, symbol) in filteredPrices" :key="symbol"
-           class="bg-(--color-bg-card) border rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none cursor-pointer transition-colors"
-           :class="selectedSymbol === symbol
-             ? 'border-(--color-accent) ring-1 ring-(--color-accent)/30'
-             : 'border-(--color-border) hover:border-(--color-accent)/50'"
-           @click="selectedSymbol = symbol as string">
-        <div class="text-sm uppercase" :class="selectedSymbol === symbol ? 'text-(--color-accent)' : 'text-(--color-text-secondary)'">{{ symbol }}</div>
-        <div class="text-xl md:text-2xl font-bold font-mono mt-1">{{ price }}</div>
+    <!-- Price Cards: Spot + Futures combined -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-1.5">
+      <div
+        v-for="item in allPairs"
+        :key="`${item.market}:${item.symbol}`"
+        class="flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-colors border"
+        :class="[
+          selectedSymbol === item.symbol && marketTab === item.market
+            ? 'border-(--color-accent) ring-1 ring-(--color-accent)/30'
+            : 'border-transparent hover:border-(--color-accent)/30',
+          item.market === 'futures'
+            ? 'bg-(--color-accent)/6'
+            : 'bg-(--color-bg-card)',
+        ]"
+        :title="item.market === 'futures' ? '合約' : '現貨'"
+        @click="selectPair(item)"
+      >
+        <span class="text-sm font-medium truncate">{{ item.symbol }}</span>
+        <span class="font-mono text-sm font-semibold tabular-nums">{{ item.price ?? '—' }}</span>
       </div>
     </div>
   </div>

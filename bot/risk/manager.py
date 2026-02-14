@@ -252,23 +252,73 @@ class RiskManager:
         ohlcv: pd.DataFrame | None = None,
         horizon: str = "medium",
         llm_size_pct: float = 0.0,
+        llm_stop_loss: float = 0.0,
+        llm_take_profit: float = 0.0,
     ) -> RiskOutput:
         """評估交易訊號是否通過風控。每日虧損限制只阻止買入，不阻止賣出。"""
         with self._lock:
             self._reset_daily_pnl_if_needed()
 
             if signal == Signal.BUY:
-                return self._evaluate_buy(symbol, price, balance, ohlcv, horizon, llm_size_pct)
+                return self._evaluate_buy(
+                    symbol, price, balance, ohlcv, horizon, llm_size_pct,
+                    llm_stop_loss, llm_take_profit,
+                )
             elif signal == Signal.SELL:
                 return self._evaluate_sell(symbol, price)
             else:
                 return RiskOutput(approved=False, reason="HOLD 訊號")
+
+    def _validate_llm_prices(
+        self, price: float, llm_sl: float, llm_tp: float,
+        horizon: str = "medium", is_short: bool = False,
+    ) -> tuple[float, float, str]:
+        """驗證 LLM 的 SL/TP 價位，回傳 (sl, tp, note)。"""
+        hp = self._get_horizon_params(horizon)
+
+        if is_short:
+            # SHORT: SL > price, TP < price
+            if llm_sl <= price or llm_tp >= price:
+                return 0, 0, "做空方向不正確"
+            sl_dist = llm_sl - price
+            tp_dist = price - llm_tp
+        else:
+            # BUY: SL < price, TP > price
+            if llm_sl >= price or llm_tp <= price:
+                return 0, 0, "做多方向不正確"
+            sl_dist = price - llm_sl
+            tp_dist = llm_tp - price
+
+        sl_pct = sl_dist / price
+        # 最小 SL 距離 0.5%
+        if sl_pct < 0.005:
+            return 0, 0, f"SL 距離太近 ({sl_pct:.2%} < 0.5%)"
+        # 最大 SL 距離 15%
+        if sl_pct > 0.15:
+            return 0, 0, f"SL 距離太遠 ({sl_pct:.2%} > 15%)"
+
+        # R:R 檢查
+        rr = tp_dist / sl_dist if sl_dist > 0 else 0
+        note = ""
+        if rr < hp["min_rr"]:
+            # 調整 TP 以滿足最低 R:R
+            adjusted_tp_dist = sl_dist * hp["min_rr"]
+            if is_short:
+                llm_tp = price - adjusted_tp_dist
+            else:
+                llm_tp = price + adjusted_tp_dist
+            note = f"TP 調整至 R:R>={hp['min_rr']:.1f} ({rr:.2f}→{hp['min_rr']:.1f})"
+            logger.info("LLM 價位調整: %s", note)
+
+        return llm_sl, llm_tp, note
 
     def _evaluate_buy(
         self, symbol: str, price: float, balance: float,
         ohlcv: pd.DataFrame | None = None,
         horizon: str = "medium",
         llm_size_pct: float = 0.0,
+        llm_stop_loss: float = 0.0,
+        llm_take_profit: float = 0.0,
     ) -> RiskOutput:
         # 注意: 呼叫者 evaluate() 已持有 self._lock
 
@@ -304,10 +354,23 @@ class RiskManager:
         if quantity <= 0:
             return RiskOutput(approved=False, reason="計算數量為 0")
 
-        # 動態 SL/TP（根據 horizon）
-        sl_distance, tp_distance, _ = self._calc_sl_tp_distance(price, ohlcv, horizon)
-        stop_loss = price - sl_distance
-        take_profit = price + tp_distance
+        # SL/TP：優先用 LLM 價位，fallback 用 ATR/百分比
+        if llm_stop_loss > 0 and llm_take_profit > 0:
+            stop_loss, take_profit, note = self._validate_llm_prices(
+                price, llm_stop_loss, llm_take_profit, horizon,
+            )
+            if stop_loss <= 0:
+                # 驗證失敗，fallback
+                logger.info("LLM 價位驗證失敗 (%s)，使用風控計算", note)
+                sl_distance, tp_distance, _ = self._calc_sl_tp_distance(price, ohlcv, horizon)
+                stop_loss = price - sl_distance
+                take_profit = price + tp_distance
+            elif note:
+                logger.info("LLM 價位已調整: %s", note)
+        else:
+            sl_distance, tp_distance, _ = self._calc_sl_tp_distance(price, ohlcv, horizon)
+            stop_loss = price - sl_distance
+            take_profit = price + tp_distance
 
         logger.info(
             "風控通過 BUY %s: 數量=%.8f, 停損=%.2f, 停利=%.2f [horizon=%s]",
@@ -378,6 +441,27 @@ class RiskManager:
             symbol, pnl, position["entry_price"], exit_price,
         )
         return pnl
+
+    def get_position(self, symbol: str) -> dict | None:
+        """取得指定持倉。"""
+        with self._lock:
+            pos = self._open_positions.get(symbol)
+            return dict(pos) if pos else None
+
+    def get_all_positions(self) -> dict[str, dict]:
+        """取得所有持倉（回傳副本，thread-safe）。"""
+        with self._lock:
+            return {k: dict(v) for k, v in self._open_positions.items()}
+
+    def force_remove_position(self, symbol: str) -> None:
+        """強制移除幻影持倉（不記錄 PnL，用於對齊）。"""
+        with self._lock:
+            removed = self._open_positions.pop(symbol, None)
+        if removed:
+            logger.warning(
+                "強制移除幻影持倉: %s (entry=%.2f, qty=%.8f)",
+                symbol, removed["entry_price"], removed["quantity"],
+            )
 
     def check_stop_loss_take_profit(
         self, symbol: str, current_price: float,

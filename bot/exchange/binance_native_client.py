@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 from binance.error import ClientError, ServerError
 from binance.spot import Spot
@@ -177,6 +179,7 @@ class BinanceClient(BaseExchange):
 
     @retry(max_retries=2, delay=0.5)
     def place_market_order(self, symbol: str, side: str, amount: float) -> dict:
+        amount = self._round_quantity(symbol, amount)
         logger.info("下市價單: %s %s %.8f", side.upper(), symbol, amount)
         try:
             order = self._client.new_order(
@@ -185,7 +188,25 @@ class BinanceClient(BaseExchange):
                 type="MARKET",
                 quantity=amount,
             )
-            logger.info("市價單成交: ID=%s, 狀態=%s", order["orderId"], order["status"])
+            logger.info("市價單回應: ID=%s, 狀態=%s", order["orderId"], order["status"])
+
+            # Testnet 市價單可能回傳 status=NEW, executedQty=0
+            filled = float(order.get("executedQty", 0))
+            if filled == 0 and order.get("status") not in ("CANCELED", "REJECTED", "EXPIRED"):
+                import time as _time
+                _time.sleep(0.5)
+                try:
+                    order = self._client.get_order(
+                        symbol=self._to_native(symbol),
+                        orderId=order["orderId"],
+                    )
+                    logger.info(
+                        "市價單查詢確認: filled=%.8f, status=%s",
+                        float(order.get("executedQty", 0)), order.get("status"),
+                    )
+                except Exception as e:
+                    logger.warning("查詢市價單成交狀態失敗: %s", e)
+
             return self._format_order(order, symbol)
         except ClientError as e:
             raise _map_error(e, "下單失敗") from e
@@ -196,6 +217,8 @@ class BinanceClient(BaseExchange):
     def place_limit_order(
         self, symbol: str, side: str, amount: float, price: float,
     ) -> dict:
+        amount = self._round_quantity(symbol, amount)
+        price = self._round_price(symbol, price)
         logger.info("下限價單: %s %s %.8f @ %.8f", side.upper(), symbol, amount, price)
         try:
             order = self._client.new_order(
@@ -252,7 +275,10 @@ class BinanceClient(BaseExchange):
         stop_loss_price: float,
     ) -> dict:
         """掛 OCO 賣單（停利 + 停損同時掛）。"""
-        stop_limit_price = stop_loss_price * 0.998
+        amount = self._round_quantity(symbol, amount)
+        take_profit_price = self._round_price(symbol, take_profit_price)
+        stop_loss_price = self._round_price(symbol, stop_loss_price)
+        stop_limit_price = self._round_price(symbol, stop_loss_price * 0.998)
 
         logger.info(
             "掛 OCO 賣單: %s qty=%.8f TP=%.2f SL=%.2f",
@@ -334,6 +360,28 @@ class BinanceClient(BaseExchange):
         if info:
             return info["min_qty"]
         return 0.0
+
+    def _round_step(self, value: float, step: float) -> float:
+        """根據 step_size/tick_size 截斷數值（向下取整，避免超出精度）。"""
+        if step <= 0:
+            return value
+        precision = max(0, round(-math.log10(step)))
+        factor = 10 ** precision
+        return math.floor(value * factor) / factor
+
+    def _round_quantity(self, symbol: str, amount: float) -> float:
+        """根據交易對的 step_size 截斷下單數量。"""
+        info = self._market_info.get(symbol)
+        if info and info["step_size"] > 0:
+            return self._round_step(amount, info["step_size"])
+        return amount
+
+    def _round_price(self, symbol: str, price: float) -> float:
+        """根據交易對的 tick_size 截斷價格。"""
+        info = self._market_info.get(symbol)
+        if info and info["tick_size"] > 0:
+            return self._round_step(price, info["tick_size"])
+        return price
 
     # ─── Loan 相關（Flexible Loan v2，使用 sign_request） ───
 

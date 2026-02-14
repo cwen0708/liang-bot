@@ -34,6 +34,9 @@ export interface LLMDecision {
   market_type: 'spot' | 'futures'
   executed: boolean
   reject_reason?: string
+  entry_price?: number | null
+  stop_loss?: number | null
+  take_profit?: number | null
   mode: 'paper' | 'live'
   created_at: string
 }

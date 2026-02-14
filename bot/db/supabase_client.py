@@ -109,7 +109,10 @@ class SupabaseWriter:
                             market_type: str = "spot",
                             executed: bool = True,
                             reject_reason: str = "",
-                            mode: str = "live") -> None:
+                            mode: str = "live",
+                            entry_price: float = 0.0,
+                            stop_loss: float = 0.0,
+                            take_profit: float = 0.0) -> None:
         if not self._enabled:
             return
         try:
@@ -126,6 +129,12 @@ class SupabaseWriter:
             }
             if reject_reason:
                 row["reject_reason"] = reject_reason
+            if entry_price > 0:
+                row["entry_price"] = entry_price
+            if stop_loss > 0:
+                row["stop_loss"] = stop_loss
+            if take_profit > 0:
+                row["take_profit"] = take_profit
             self._client.table("llm_decisions").insert(row).execute()
         except Exception as e:
             logger.debug("寫入 llm_decisions 失敗: %s", e)

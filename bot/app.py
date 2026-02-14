@@ -154,8 +154,9 @@ def make_llm_decision(
         llm_signal = action_map.get(decision.action, Signal.HOLD)
 
         llm_override = False
+        is_close_signal = llm_signal in (Signal.SELL, Signal.COVER)
         strategy_signals = {v.signal for v in verdicts}
-        if llm_signal != Signal.HOLD and llm_signal not in strategy_signals:
+        if llm_signal != Signal.HOLD and llm_signal not in strategy_signals and not is_close_signal:
             if decision.confidence >= 0.7:
                 logger.warning(
                     "%s[LLM] 覆蓋策略: %s (信心 %.2f)，無策略支持（策略: %s）→ 倉位縮半",

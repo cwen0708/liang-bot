@@ -49,6 +49,11 @@ const router = createRouter({
       component: () => import('@/pages/LogsPage.vue'),
     },
     {
+      path: '/tx',
+      name: 'tx',
+      component: () => import('@/pages/TXPage.vue'),
+    },
+    {
       path: '/more',
       name: 'more',
       component: () => import('@/pages/MorePage.vue'),

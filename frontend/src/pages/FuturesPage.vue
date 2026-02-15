@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useBotStore } from '@/stores/bot'
 import { useSupabase } from '@/composables/useSupabase'
 import { useRealtimeTable } from '@/composables/useRealtime'
+import StrategyDecisionSection from '@/components/StrategyDecisionSection.vue'
 import type { Order, LLMDecision } from '@/types'
 
 const bot = useBotStore()
@@ -122,26 +123,41 @@ const tradePairs = computed<FuturesTradePair[]>(() => {
       }
     }
 
-    // Unmatched opens = still in position
-    for (const openOrder of unmatchedOpens) {
-      const positionSide = (openOrder.position_side ?? 'long') as 'long' | 'short'
+    // Unmatched opens — cross-check with positions table to avoid ghost entries
+    // positions 表用 upsert (symbol+side) 只保留一筆，所以每個 symbol+side 也只取最新的開倉單
+    if (unmatchedOpens.length > 0) {
+      // 取最新的一筆（unmatchedOpens 已按時間排序，最新在最後）
+      const latestOpen = unmatchedOpens[unmatchedOpens.length - 1]!
+      const positionSide = (latestOpen.position_side ?? 'long') as 'long' | 'short'
       const direction = positionSide === 'short' ? -1 : 1
-      const currentPrice = livePrice(openOrder.symbol, openOrder.price)
-      const entryPrice = openOrder.price
-      const leverage = openOrder.leverage ?? 1
-      const pnl = (currentPrice - entryPrice) * openOrder.quantity * direction
-      const pnlPct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 * direction * leverage : 0
-      pairs.push({
-        id: `fp-${openOrder.id}`,
-        symbol: openOrder.symbol,
-        positionSide,
-        leverage,
-        openOrder, closeOrder: null,
-        entryPrice, exitPrice: null,
-        quantity: openOrder.quantity, pnl, pnlPct,
-        holdDurationMs: Date.now() - new Date(openOrder.created_at).getTime(),
-        status: 'open',
-      })
+
+      // 若 positions 表中已無此 symbol+side 的持倉，表示已被 SL/TP 或其他方式平掉
+      const stillHeld = filteredFuturesPositions.value.some(
+        p => p.symbol === latestOpen.symbol && p.side === positionSide,
+      )
+      if (stillHeld) {
+        // 用 positions 表的入場價和數量（更準確，因為 upsert 會更新）
+        const pos = filteredFuturesPositions.value.find(
+          p => p.symbol === latestOpen.symbol && p.side === positionSide,
+        )
+        const entryPrice = pos?.entry_price ?? latestOpen.price
+        const quantity = pos?.quantity ?? latestOpen.quantity
+        const currentPrice = livePrice(latestOpen.symbol, latestOpen.price)
+        const leverage = latestOpen.leverage ?? 1
+        const pnl = (currentPrice - entryPrice) * quantity * direction
+        const pnlPct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 * direction * leverage : 0
+        pairs.push({
+          id: `fp-${latestOpen.id}`,
+          symbol: latestOpen.symbol,
+          positionSide,
+          leverage,
+          openOrder: latestOpen, closeOrder: null,
+          entryPrice, exitPrice: null,
+          quantity, pnl, pnlPct,
+          holdDurationMs: Date.now() - new Date(latestOpen.created_at).getTime(),
+          status: 'open',
+        })
+      }
     }
   }
 
@@ -214,14 +230,15 @@ function toggleSymbolGroup(symbol: string) {
 // ─── AI Decision: on-demand fetch ────────────────────────
 const decisionCache = ref(new Map<string, LLMDecision | null>())
 
-async function fetchDecision(cycleId: string, symbol: string): Promise<LLMDecision | null> {
-  const key = `${cycleId}:${symbol}`
+async function fetchDecision(cycleId: string, symbol: string, marketType: string = 'futures'): Promise<LLMDecision | null> {
+  const key = `${cycleId}:${symbol}:${marketType}`
   if (decisionCache.value.has(key)) return decisionCache.value.get(key)!
   const { data } = await supabase
     .from('llm_decisions')
     .select('*')
     .eq('cycle_id', cycleId)
     .eq('symbol', symbol)
+    .eq('market_type', marketType)
     .limit(1)
     .single()
   const decision = (data as LLMDecision) ?? null
@@ -432,39 +449,41 @@ async function copyPageText() {
 <template>
   <div class="p-4 md:p-6 flex flex-col gap-4 md:gap-6 md:h-[calc(100vh)] md:overflow-hidden">
     <!-- Header -->
-    <div class="flex items-center justify-between gap-2 shrink-0 flex-wrap">
+    <div class="shrink-0">
       <h2 class="text-2xl md:text-3xl font-bold">合約</h2>
-      <div class="flex items-center gap-2">
-        <button
-          class="p-1.5 rounded-lg transition-colors"
-          :class="copySuccess ? 'text-(--color-success) bg-(--color-success)/10' : 'text-(--color-text-secondary) hover:bg-(--color-bg-secondary)'"
-          title="複製頁面資訊"
-          @click="copyPageText"
-        >
-          <svg v-if="!copySuccess" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-          <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-        </button>
-        <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
-          <button
-            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-            :class="viewMode === 'pairs'
-              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="viewMode = 'pairs'"
-          >交易配對</button>
-          <button
-            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-            :class="viewMode === 'flat'
-              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="viewMode = 'flat'"
-          >原始訂單</button>
-        </div>
-      </div>
     </div>
 
     <!-- Scrollable content -->
     <div class="flex flex-col gap-4 md:gap-5 min-h-0 md:flex-1 md:overflow-auto">
+
+    <!-- Toolbar -->
+    <div class="flex items-center justify-end gap-2 shrink-0 flex-wrap">
+      <button
+        class="p-1.5 rounded-lg transition-colors"
+        :class="copySuccess ? 'text-(--color-success) bg-(--color-success)/10' : 'text-(--color-text-secondary) hover:bg-(--color-bg-secondary)'"
+        title="複製頁面資訊"
+        @click="copyPageText"
+      >
+        <svg v-if="!copySuccess" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+        <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </button>
+      <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
+        <button
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+          :class="viewMode === 'pairs'
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="viewMode = 'pairs'"
+        >交易配對</button>
+        <button
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+          :class="viewMode === 'flat'
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="viewMode = 'flat'"
+        >原始訂單</button>
+      </div>
+    </div>
 
     <!-- Margin Account Summary -->
     <div class="grid grid-cols-3 md:grid-cols-5 gap-2 md:gap-3">
@@ -599,6 +618,9 @@ async function copyPageText() {
         </div>
       </div>
     </section>
+
+    <!-- ===== Strategy Decisions ===== -->
+    <StrategyDecisionSection market-type="futures" :filter-symbol="filterSymbol" />
 
     <!-- ===== Trade History ===== -->
     <div>

@@ -146,6 +146,13 @@ loan_guard:
   low_ltv: 0.40               # 低於此 → 減少質押賣出（高賣）
   dry_run: false              # true=只告警, false=AI審核通過後實際執行
 
+# Taiwan Index Analysis (analysis-only)
+tx:
+  enabled: true
+  symbol: "^TWII"
+  display_name: "TX"
+  timeframes: ["15m", "1h", "1d"]
+
 # Logging
 logging:
   level: "INFO"

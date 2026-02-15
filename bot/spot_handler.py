@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from bot.config.constants import DataFeedType, TF_MINUTES
@@ -71,6 +71,7 @@ class SpotHandler:
 
         # 策略 slot 防重複
         self._last_strategy_slot: dict[str, int] = {}
+        self._cooldown_until: dict[str, datetime] = {}  # symbol → 冷卻結束時間
 
     def process_symbol(
         self,
@@ -270,6 +271,9 @@ class SpotHandler:
         )
 
         # ── 7. 風控 + 執行 ──
+        if final_signal == Signal.BUY and self._is_in_cooldown(symbol):
+            return
+
         if final_signal == Signal.BUY:
             try:
                 balance = self._exchange.get_balance()
@@ -387,6 +391,7 @@ class SpotHandler:
             _mode = self._settings.spot.mode.value
             self._db.delete_position(symbol, mode=_mode)
             logger.info("%s[現貨] ✓ 清理小額持倉 %s, PnL=%.4f USDT", _L3, symbol, pnl)
+            self._set_cooldown(symbol)
             return
 
         order = self._executor.execute(Signal.SELL, symbol, risk_output)
@@ -398,6 +403,27 @@ class SpotHandler:
             self._db.insert_order(order, mode=_mode, cycle_id=cycle_id)
             self._db.delete_position(symbol, mode=_mode)
             logger.info("%s[現貨] ✓ SELL %s @ %.2f, PnL=%.2f USDT", _L3, symbol, fill_price, pnl)
+            self._set_cooldown(symbol)
+
+    def _set_cooldown(self, symbol: str) -> None:
+        """平倉後設定冷卻期，防止同 symbol 短時間內再開倉。"""
+        minutes = self._settings.spot.cooldown_minutes
+        if minutes > 0:
+            until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+            self._cooldown_until[symbol] = until
+            logger.info("%s[現貨] %s 進入冷卻期 %d 分鐘", _L2, symbol, minutes)
+
+    def _is_in_cooldown(self, symbol: str) -> bool:
+        """檢查 symbol 是否在冷卻期內。"""
+        until = self._cooldown_until.get(symbol)
+        if until is None:
+            return False
+        if datetime.now(timezone.utc) >= until:
+            del self._cooldown_until[symbol]
+            return False
+        remaining = (until - datetime.now(timezone.utc)).total_seconds() / 60
+        logger.info("%s[現貨] %s 冷卻中，剩餘 %.0f 分鐘", _L2, symbol, remaining)
+        return True
 
     def _sync_oco_order(self, symbol: str) -> bool:
         """檢查交易所 OCO 訂單是否已成交。"""
@@ -416,6 +442,7 @@ class SpotHandler:
                         "%s[現貨] 交易所 %s 成交: %s @ %.2f, PnL=%.2f USDT",
                         _L2, label, symbol, fill_price, pnl,
                     )
+                    self._set_cooldown(symbol)
                     return True
             except Exception as e:
                 logger.debug("查詢 OCO 訂單 %s 失敗: %s", order_id, e)

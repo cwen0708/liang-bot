@@ -4,6 +4,7 @@ import { RouterLink } from 'vue-router'
 const items = [
   { to: '/trading', label: '行情', icon: 'trading', desc: 'K 線圖與持倉詳情' },
   { to: '/futures', label: '合約', icon: 'futures', desc: '永續合約持倉與保證金' },
+  { to: '/tx', label: '台指', icon: 'tx', desc: '台灣加權指數策略分析' },
   { to: '/review', label: '復盤', icon: 'review', desc: '每日 AI 復盤檢討報告' },
   { to: '/logs', label: '日誌', icon: 'logs', desc: '即時 Bot 日誌串流' },
   { to: '/config', label: '設定', icon: 'config', desc: 'Bot 配置管理' },
@@ -27,6 +28,9 @@ const items = [
             </template>
             <template v-else-if="item.icon === 'futures'">
               <path d="M2 17l6-6 4 4 10-10" /><path d="M22 7h-6" /><path d="M2 7l6 6 4-4 10 10" /><path d="M22 17h-6" />
+            </template>
+            <template v-else-if="item.icon === 'tx'">
+              <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="7" y1="8" x2="7" y2="16" /><line x1="12" y1="6" x2="12" y2="16" /><line x1="17" y1="10" x2="17" y2="16" />
             </template>
             <template v-else-if="item.icon === 'review'">
               <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" /><rect x="9" y="3" width="6" height="4" rx="1" /><line x1="9" y1="12" x2="15" y2="12" /><line x1="9" y1="16" x2="13" y2="16" />

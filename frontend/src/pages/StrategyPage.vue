@@ -179,16 +179,6 @@ function signalBadgeClass(signal: string) {
   return 'text-(--color-text-muted)'
 }
 
-function verdictBgStyle(signal: string, confidence: number): Record<string, string> {
-  const bg = 'var(--color-bg-secondary)'
-  if (confidence <= 0 || signal === 'HOLD') return { background: bg }
-  const pct = Math.round(confidence * 100)
-  const color = (signal === 'BUY' || signal === 'COVER') ? 'var(--color-success)' : 'var(--color-danger)'
-  return {
-    background: `linear-gradient(to right, color-mix(in srgb, ${color} 25%, transparent) 0%, color-mix(in srgb, ${color} 12%, transparent) ${pct}%, transparent ${pct}%) ${bg}`,
-  }
-}
-
 function signalLabel(signal: string) {
   if (signal === 'BUY') return '買入'
   if (signal === 'SELL') return '賣出'
@@ -521,6 +511,7 @@ const drawerDecision = ref<LLMDecision | null>(null)
           </div>
         </div>
       </section>
+
     </div>
 
     <DecisionDrawer :decision="drawerDecision" @close="drawerDecision = null" />

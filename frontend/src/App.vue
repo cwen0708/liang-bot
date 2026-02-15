@@ -26,6 +26,7 @@ const navItems = [
   { to: '/strategy', label: '策略', icon: 'strategy' },
   { to: '/orders', label: '現貨', icon: 'orders' },
   { to: '/futures', label: '合約', icon: 'futures' },
+  { to: '/tx', label: '台指', icon: 'tx' },
   { to: '/review', label: '復盤', icon: 'review' },
   { to: '/loan-guard', label: '借貸', icon: 'shield' },
   { to: '/logs', label: '日誌', icon: 'logs' },
@@ -95,6 +96,10 @@ const mobileTabItems = [
             <!-- Strategy -->
             <template v-else-if="item.icon === 'strategy'">
               <circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="3" /><line x1="12" y1="2" x2="12" y2="5" /><line x1="12" y1="19" x2="12" y2="22" />
+            </template>
+            <!-- TX (台指) -->
+            <template v-else-if="item.icon === 'tx'">
+              <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="7" y1="8" x2="7" y2="16" /><line x1="12" y1="6" x2="12" y2="16" /><line x1="17" y1="10" x2="17" y2="16" />
             </template>
             <!-- Review -->
             <template v-else-if="item.icon === 'review'">

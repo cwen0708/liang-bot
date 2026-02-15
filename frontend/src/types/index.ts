@@ -17,7 +17,7 @@ export interface StrategyVerdict {
   confidence: number
   reasoning: string
   cycle_id: string
-  market_type: 'spot' | 'futures'
+  market_type: 'spot' | 'futures' | 'tx'
   timeframe: string
   mode: 'paper' | 'live'
   created_at: string
@@ -31,7 +31,7 @@ export interface LLMDecision {
   reasoning: string
   model: string
   cycle_id: string
-  market_type: 'spot' | 'futures'
+  market_type: 'spot' | 'futures' | 'tx'
   executed: boolean
   reject_reason?: string
   entry_price?: number | null
@@ -55,7 +55,7 @@ export interface Order {
   mode: 'paper' | 'live'
   cycle_id: string
   created_at: string
-  market_type: 'spot' | 'futures'
+  market_type: 'spot' | 'futures' | 'tx'
   position_side: 'long' | 'short' | null
   leverage: number
   reduce_only: boolean
@@ -75,7 +75,7 @@ export interface Position {
   side: 'long' | 'short'
   leverage: number
   liquidation_price: number | null
-  market_type: 'spot' | 'futures'
+  market_type: 'spot' | 'futures' | 'tx'
   margin_type: 'cross' | 'isolated'
   entry_horizon: string
   entry_reasoning: string

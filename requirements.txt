@@ -33,3 +33,6 @@ matplotlib>=3.8.0
 
 # Supabase (database layer)
 supabase>=2.0.0
+
+# Taiwan Index Data (analysis-only)
+yfinance>=0.2.30

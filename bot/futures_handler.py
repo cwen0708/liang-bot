@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from bot.config.constants import DataFeedType, TF_MINUTES
@@ -62,6 +62,51 @@ class FuturesHandler:
         self._llm_engine = llm_engine
         self._router = router
         self._last_strategy_slot: dict[str, int] = {}
+        self._cooldown_until: dict[str, datetime] = {}  # symbol → 冷卻結束時間
+
+    def resolve_active_pairs(self) -> tuple[str, ...]:
+        """根據帳戶餘額和 position_tiers 設定，返回活躍交易對並更新風控參數。
+
+        若未設定 tiers，直接返回 config 中的所有 pairs（向後相容）。
+        """
+        fc = self._settings.futures
+        tiers = fc.position_tiers
+
+        if not tiers:
+            return fc.pairs
+
+        try:
+            balance = self._exchange.get_futures_balance()
+            wallet_balance = balance["total_wallet_balance"]
+        except Exception:
+            logger.debug("無法取得合約餘額，使用全部交易對")
+            return fc.pairs
+
+        # 匹配 tier：取最後一個 min_balance <= wallet_balance 的 tier
+        matched = tiers[0]  # 預設最低 tier
+        for tier in tiers:
+            if wallet_balance >= tier.min_balance:
+                matched = tier
+            else:
+                break
+
+        # 截斷 pairs（保留 config 中的順序，靠前的優先）
+        active_pairs = fc.pairs[:matched.max_pairs]
+
+        # 更新風控參數
+        self._risk.update_tier(
+            max_position_pct=matched.max_position_pct,
+            max_open_positions=min(matched.max_pairs, len(active_pairs)),
+        )
+
+        logger.info(
+            "%s[合約] 倉位分層: 餘額=$%.2f → %d 對, 倉位比例=%.0f%%, 交易對=%s",
+            _L1, wallet_balance, len(active_pairs),
+            matched.max_position_pct * 100,
+            [p.split("/")[0] for p in active_pairs],
+        )
+
+        return active_pairs
 
     def process_symbol(
         self,
@@ -248,6 +293,9 @@ class FuturesHandler:
         logger.info("%s[合約] → %s (信心 %.2f, horizon=%s)", _L2, final_signal.value, final_confidence, horizon)
 
         # ── 7. 風控 + 執行 ──
+        if final_signal in (Signal.BUY, Signal.SHORT) and self._is_in_cooldown(symbol):
+            return
+
         if final_signal in (Signal.BUY, Signal.SHORT):
             self._execute_open(
                 symbol, final_signal, current_price, cycle_id,
@@ -263,9 +311,19 @@ class FuturesHandler:
         has_short = self._risk.get_position(symbol, "short") is not None
 
         if signal == Signal.SELL:
-            return Signal.SELL if has_long else Signal.SHORT
+            if has_long:
+                return Signal.SELL
+            if has_short:
+                logger.info("%s[合約] 已有空倉 %s，忽略 SELL→SHORT", _L2, symbol)
+                return Signal.HOLD
+            return Signal.SHORT
         elif signal == Signal.BUY:
-            return Signal.COVER if has_short else Signal.BUY
+            if has_short:
+                return Signal.COVER
+            if has_long:
+                logger.info("%s[合約] 已有多倉 %s，忽略 BUY", _L2, symbol)
+                return Signal.HOLD
+            return Signal.BUY
         elif signal == Signal.SHORT:
             if has_short:
                 logger.info("%s[合約] 已有空倉 %s，忽略 SHORT", _L2, symbol)
@@ -400,6 +458,7 @@ class FuturesHandler:
             self._db.delete_position(
                 symbol, mode=fc.mode.value, market_type="futures", side=side,
             )
+            self._set_cooldown(symbol)
             return
 
         if not order:
@@ -421,6 +480,27 @@ class FuturesHandler:
             "%s[合約] %s %s @ %.2f, PnL=%.2f USDT",
             _L3, side_label, symbol, fill_price, pnl,
         )
+        self._set_cooldown(symbol)
+
+    def _set_cooldown(self, symbol: str) -> None:
+        """平倉後設定冷卻期，防止同 symbol 短時間內再開倉。"""
+        minutes = self._settings.futures.cooldown_minutes
+        if minutes > 0:
+            until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+            self._cooldown_until[symbol] = until
+            logger.info("%s[合約] %s 進入冷卻期 %d 分鐘", _L2, symbol, minutes)
+
+    def _is_in_cooldown(self, symbol: str) -> bool:
+        """檢查 symbol 是否在冷卻期內。"""
+        until = self._cooldown_until.get(symbol)
+        if until is None:
+            return False
+        if datetime.now(timezone.utc) >= until:
+            del self._cooldown_until[symbol]
+            return False
+        remaining = (until - datetime.now(timezone.utc)).total_seconds() / 60
+        logger.info("%s[合約] %s 冷卻中，剩餘 %.0f 分鐘", _L2, symbol, remaining)
+        return True
 
     def _sync_sl_tp(self, symbol: str, side: str) -> bool:
         """檢查合約 SL/TP 掛單是否已成交。"""
@@ -439,6 +519,7 @@ class FuturesHandler:
                         "%s[合約] 交易所 %s 成交: %s %s @ %.2f, PnL=%.2f USDT",
                         _L2, label, symbol, side, fill_price, pnl,
                     )
+                    self._set_cooldown(symbol)
                     return True
             except Exception as e:
                 logger.debug("[合約] 查詢訂單 %s 失敗: %s", order_id, e)
@@ -500,7 +581,7 @@ class FuturesHandler:
         return PortfolioState(
             available_balance=available,
             positions=positions,
-            max_positions=fc.max_open_positions,
+            max_positions=self._risk.effective_max_open_positions,
             current_position_count=pos_count,
             daily_realized_pnl=daily_pnl,
             daily_risk_remaining=available * fc.max_daily_loss_pct + daily_pnl,

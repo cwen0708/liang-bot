@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { useBotStore } from '@/stores/bot'
 import { useSupabase } from '@/composables/useSupabase'
 import { useRealtimeTable } from '@/composables/useRealtime'
+import StrategyDecisionSection from '@/components/StrategyDecisionSection.vue'
 import type { Order, LLMDecision } from '@/types'
 
 const bot = useBotStore()
@@ -117,19 +118,27 @@ const tradePairs = computed<TradePair[]>(() => {
       }
     }
 
-    // Unmatched buys = open positions
-    for (const buyOrder of unmatchedBuys) {
-      const currentPrice = bot.latestPrices[symbol] ?? buyOrder.price
-      const pnl = (currentPrice - buyOrder.price) * buyOrder.quantity
-      const pnlPct = buyOrder.price > 0 ? ((currentPrice - buyOrder.price) / buyOrder.price) * 100 : 0
-      pairs.push({
-        id: `pair-${buyOrder.id}`,
-        symbol, buyOrder, sellOrder: null,
-        entryPrice: buyOrder.price, exitPrice: null,
-        quantity: buyOrder.quantity, pnl, pnlPct,
-        holdDurationMs: Date.now() - new Date(buyOrder.created_at).getTime(),
-        status: 'open',
-      })
+    // Unmatched buys — cross-check with positions table to avoid ghost entries
+    // positions 表用 upsert (symbol) 只保留一筆，所以每個 symbol 也只取最新的開倉單
+    if (unmatchedBuys.length > 0) {
+      const latestBuy = unmatchedBuys[unmatchedBuys.length - 1]!
+      const stillHeld = filteredPositions.value.some(p => p.symbol === symbol)
+      if (stillHeld) {
+        const pos = filteredPositions.value.find(p => p.symbol === symbol)
+        const entryPrice = pos?.entry_price ?? latestBuy.price
+        const quantity = pos?.quantity ?? latestBuy.quantity
+        const currentPrice = bot.latestPrices[symbol] ?? latestBuy.price
+        const pnl = (currentPrice - entryPrice) * quantity
+        const pnlPct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0
+        pairs.push({
+          id: `pair-${latestBuy.id}`,
+          symbol, buyOrder: latestBuy, sellOrder: null,
+          entryPrice, exitPrice: null,
+          quantity, pnl, pnlPct,
+          holdDurationMs: Date.now() - new Date(latestBuy.created_at).getTime(),
+          status: 'open',
+        })
+      }
     }
   }
 
@@ -214,14 +223,15 @@ function toggleSymbolGroup(symbol: string) {
 // ─── AI Decision: on-demand fetch ──────────────────────────
 const decisionCache = ref(new Map<string, LLMDecision | null>())
 
-async function fetchDecision(cycleId: string, symbol: string): Promise<LLMDecision | null> {
-  const key = `${cycleId}:${symbol}`
+async function fetchDecision(cycleId: string, symbol: string, marketType: string = 'spot'): Promise<LLMDecision | null> {
+  const key = `${cycleId}:${symbol}:${marketType}`
   if (decisionCache.value.has(key)) return decisionCache.value.get(key)!
   const { data } = await supabase
     .from('llm_decisions')
     .select('*')
     .eq('cycle_id', cycleId)
     .eq('symbol', symbol)
+    .eq('market_type', marketType)
     .limit(1)
     .single()
   const decision = (data as LLMDecision) ?? null
@@ -442,65 +452,67 @@ async function copyPageText() {
 <template>
   <div class="p-4 md:p-6 flex flex-col gap-4 md:gap-6 md:h-[calc(100vh)] md:overflow-hidden">
     <!-- Header -->
-    <div class="flex items-center justify-between gap-2 shrink-0 flex-wrap">
+    <div class="shrink-0">
       <h2 class="text-2xl md:text-3xl font-bold">現貨</h2>
-      <div class="flex items-center gap-2">
-        <!-- Copy button -->
-        <button
-          class="p-1.5 rounded-lg transition-colors"
-          :class="copySuccess ? 'text-(--color-success) bg-(--color-success)/10' : 'text-(--color-text-secondary) hover:bg-(--color-bg-secondary)'"
-          title="複製頁面資訊"
-          @click="copyPageText"
-        >
-          <svg v-if="!copySuccess" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-          <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-        </button>
-        <!-- View mode toggle -->
-        <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
-          <button
-            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-            :class="viewMode === 'pairs'
-              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="viewMode = 'pairs'"
-          >交易配對</button>
-          <button
-            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-            :class="viewMode === 'flat'
-              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="viewMode = 'flat'"
-          >原始訂單</button>
-        </div>
-        <!-- Status filter (flat view only) -->
-        <div v-if="viewMode === 'flat'" class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
-          <button
-            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-            :class="!filterStatus
-              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="filterStatus = ''"
-          >全部</button>
-          <button
-            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-            :class="filterStatus === 'filled'
-              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="filterStatus = 'filled'"
-          >已成交</button>
-          <button
-            class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-            :class="filterStatus === 'cancelled'
-              ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-              : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-            @click="filterStatus = 'cancelled'"
-          >已取消</button>
-        </div>
-      </div>
     </div>
 
     <!-- Scrollable content -->
     <div class="flex flex-col gap-4 md:gap-5 min-h-0 md:flex-1 md:overflow-auto">
+
+    <!-- Toolbar -->
+    <div class="flex items-center justify-end gap-2 shrink-0 flex-wrap">
+      <!-- Copy button -->
+      <button
+        class="p-1.5 rounded-lg transition-colors"
+        :class="copySuccess ? 'text-(--color-success) bg-(--color-success)/10' : 'text-(--color-text-secondary) hover:bg-(--color-bg-secondary)'"
+        title="複製頁面資訊"
+        @click="copyPageText"
+      >
+        <svg v-if="!copySuccess" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+        <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </button>
+      <!-- View mode toggle -->
+      <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
+        <button
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+          :class="viewMode === 'pairs'
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="viewMode = 'pairs'"
+        >交易配對</button>
+        <button
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+          :class="viewMode === 'flat'
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="viewMode = 'flat'"
+        >原始訂單</button>
+      </div>
+      <!-- Status filter (flat view only) -->
+      <div v-if="viewMode === 'flat'" class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
+        <button
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+          :class="!filterStatus
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="filterStatus = ''"
+        >全部</button>
+        <button
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+          :class="filterStatus === 'filled'
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="filterStatus = 'filled'"
+        >已成交</button>
+        <button
+          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
+          :class="filterStatus === 'cancelled'
+            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
+            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
+          @click="filterStatus = 'cancelled'"
+        >已取消</button>
+      </div>
+    </div>
 
     <!-- Summary Cards -->
     <div class="grid grid-cols-3 md:grid-cols-5 gap-2 md:gap-3">
@@ -628,6 +640,9 @@ async function copyPageText() {
           </div>
         </div>
       </section>
+
+      <!-- ===== Strategy Decisions ===== -->
+      <StrategyDecisionSection market-type="spot" :filter-symbol="filterSymbol" />
 
       <!-- ===== PAIRS VIEW (grouped by symbol) ===== -->
       <section v-if="viewMode === 'pairs'" class="flex flex-col min-h-0">

@@ -41,6 +41,7 @@ class SpotConfig:
     atr: "AtrConfig" = field(default_factory=lambda: AtrConfig(enabled=False))
     min_risk_reward: float = 1.5
     parallel: bool = False  # 啟用 symbol 並行處理
+    cooldown_minutes: int = 30  # 平倉後冷卻期（分鐘），同 symbol 不重新開倉
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,14 @@ class HorizonRiskConfig:
 
 
 @dataclass(frozen=True)
+class PositionTier:
+    """倉位分層配置 — 根據帳戶餘額動態調整交易對數量和倉位比例。"""
+    min_balance: float = 0.0
+    max_pairs: int = 2
+    max_position_pct: float = 0.20
+
+
+@dataclass(frozen=True)
 class FuturesConfig:
     """USDT-M 永續合約配置。"""
     enabled: bool = False
@@ -170,6 +179,17 @@ class FuturesConfig:
     atr: AtrConfig = field(default_factory=AtrConfig)
     strategies: list = field(default_factory=list)
     min_confidence: float = 0.3
+    cooldown_minutes: int = 30  # 平倉後冷卻期（分鐘），同 symbol 不重新開倉
+    position_tiers: tuple[PositionTier, ...] = ()  # 倉位分層（按 min_balance 升序）
+
+
+@dataclass(frozen=True)
+class TXConfig:
+    """台灣加權指數分析配置（純分析，不交易）。"""
+    enabled: bool = False
+    symbol: str = "^TWII"
+    display_name: str = "TX"
+    timeframes: tuple[str, ...] = ("15m", "1h", "1d")
 
 
 @dataclass(frozen=True)
@@ -194,6 +214,7 @@ class Settings:
     futures: FuturesConfig = field(default_factory=FuturesConfig)
     mtf: MultiTimeframeConfig = field(default_factory=MultiTimeframeConfig)
     horizon_risk: HorizonRiskConfig = field(default_factory=HorizonRiskConfig)
+    tx: TXConfig = field(default_factory=TXConfig)
 
     # 向後相容屬性
     @property
@@ -226,6 +247,7 @@ class Settings:
             futures=cls._load_futures(cfg.get("futures", {})),
             mtf=cls._load_mtf(cfg.get("mtf", {})),
             horizon_risk=cls._load_horizon_risk(cfg.get("horizon_risk", {})),
+            tx=cls._load_tx(cfg.get("tx", {})),
         )
 
     @classmethod
@@ -252,6 +274,7 @@ class Settings:
         futures = cls._load_futures(cfg.get("futures", {}))
         mtf = cls._load_mtf(cfg.get("mtf", {}))
         horizon_risk = cls._load_horizon_risk(cfg.get("horizon_risk", {}))
+        tx = cls._load_tx(cfg.get("tx", {}))
 
         return cls(
             exchange=exchange,
@@ -266,6 +289,7 @@ class Settings:
             futures=futures,
             mtf=mtf,
             horizon_risk=horizon_risk,
+            tx=tx,
         )
 
     @staticmethod
@@ -343,6 +367,7 @@ class Settings:
             atr=atr,
             min_risk_reward=src.get("min_risk_reward", 1.5),
             parallel=src.get("parallel", False),
+            cooldown_minutes=src.get("cooldown_minutes", 30),
         )
 
     @staticmethod
@@ -432,6 +457,19 @@ class Settings:
                 enabled=cfg.get("use_atr_stops", True),
             )
 
+        # 倉位分層配置
+        tiers_raw = cfg.get("position_tiers", [])
+        tiers = tuple(
+            PositionTier(
+                min_balance=t.get("min_balance", 0),
+                max_pairs=t.get("max_pairs", 2),
+                max_position_pct=t.get("max_position_pct", 0.20),
+            )
+            for t in tiers_raw
+        )
+        # 按 min_balance 升序排列
+        tiers = tuple(sorted(tiers, key=lambda t: t.min_balance))
+
         return FuturesConfig(
             enabled=cfg.get("enabled", False),
             pairs=tuple(cfg.get("pairs", [])),
@@ -452,6 +490,8 @@ class Settings:
             atr=atr,
             strategies=cfg.get("strategies", []),
             min_confidence=cfg.get("min_confidence", 0.3),
+            cooldown_minutes=cfg.get("cooldown_minutes", 30),
+            position_tiers=tiers,
         )
 
     @staticmethod
@@ -487,4 +527,15 @@ class Settings:
             long_tp_pct=cfg.get("long_tp_pct", 0.15),
             long_size_factor=cfg.get("long_size_factor", 0.6),
             long_min_rr=cfg.get("long_min_rr", 2.5),
+        )
+
+    @staticmethod
+    def _load_tx(cfg: dict) -> "TXConfig":
+        if not cfg:
+            return TXConfig()
+        return TXConfig(
+            enabled=cfg.get("enabled", False),
+            symbol=cfg.get("symbol", "^TWII"),
+            display_name=cfg.get("display_name", "TX"),
+            timeframes=tuple(cfg.get("timeframes", ["15m", "1h", "1d"])),
         )

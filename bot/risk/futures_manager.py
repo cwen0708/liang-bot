@@ -56,6 +56,24 @@ class FuturesRiskManager:
         self._reserved_slots: set[str] = set()  # 預留中的 pos_key
         self._daily_pnl: float = 0.0
         self._pnl_date: date = date.today()
+        # 倉位分層動態覆蓋（由 update_tier 設定）
+        self._tier_max_position_pct: float | None = None
+        self._tier_max_open_positions: int | None = None
+
+    def update_tier(self, max_position_pct: float, max_open_positions: int) -> None:
+        """根據倉位分層配置，動態覆蓋 max_position_pct 和 max_open_positions。"""
+        self._tier_max_position_pct = max_position_pct
+        self._tier_max_open_positions = max_open_positions
+
+    @property
+    def effective_max_position_pct(self) -> float:
+        """取得有效的 max_position_pct（tier 覆蓋 > config 預設）。"""
+        return self._tier_max_position_pct if self._tier_max_position_pct is not None else self.config.max_position_pct
+
+    @property
+    def effective_max_open_positions(self) -> int:
+        """取得有效的 max_open_positions（tier 覆蓋 > config 預設）。"""
+        return self._tier_max_open_positions if self._tier_max_open_positions is not None else self.config.max_open_positions
 
     @property
     def open_position_count(self) -> int:
@@ -74,10 +92,10 @@ class FuturesRiskManager:
             if pos_key in self._open_positions or pos_key in self._reserved_slots:
                 return False
             total = len(self._open_positions) + len(self._reserved_slots)
-            if total >= self.config.max_open_positions:
+            if total >= self.effective_max_open_positions:
                 return False
             self._reserved_slots.add(pos_key)
-            logger.debug("預留 slot: %s (已佔 %d/%d)", pos_key, total + 1, self.config.max_open_positions)
+            logger.debug("預留 slot: %s (已佔 %d/%d)", pos_key, total + 1, self.effective_max_open_positions)
             return True
 
     def confirm_position(
@@ -167,8 +185,8 @@ class FuturesRiskManager:
                 reason = f"保證金比率 {margin_ratio:.1%} >= {self.config.max_margin_ratio:.0%}"
             elif self._daily_pnl < -(available_margin * self.config.max_daily_loss_pct):
                 reason = f"已達每日虧損限制 ({self.config.max_daily_loss_pct * 100:.1f}%)"
-            elif len(self._open_positions) + len(self._reserved_slots) >= self.config.max_open_positions:
-                reason = f"已達最大持倉數 ({self.config.max_open_positions})"
+            elif len(self._open_positions) + len(self._reserved_slots) >= self.effective_max_open_positions:
+                reason = f"已達最大持倉數 ({self.effective_max_open_positions})"
             else:
                 pos_key = self._pos_key(symbol, side)
                 if pos_key in self._open_positions or pos_key in self._reserved_slots:
@@ -199,7 +217,7 @@ class FuturesRiskManager:
 
         # 帳戶風險
         sl_pct = sl_distance / price if price > 0 else 0
-        account_risk_pct = sl_pct * leverage * self.config.max_position_pct
+        account_risk_pct = sl_pct * leverage * self.effective_max_position_pct
 
         metrics = RiskMetrics(
             stop_loss_price=stop_loss,
@@ -347,8 +365,8 @@ class FuturesRiskManager:
 
         # 最大持倉數（含預留 slot）
         total = len(self._open_positions) + len(self._reserved_slots)
-        if total >= self.config.max_open_positions:
-            reason = f"已達最大持倉數 ({self.config.max_open_positions})"
+        if total >= self.effective_max_open_positions:
+            reason = f"已達最大持倉數 ({self.effective_max_open_positions})"
             logger.warning(reason)
             return FuturesRiskOutput(approved=False, reason=reason)
 
@@ -403,12 +421,13 @@ class FuturesRiskManager:
         # ── 4. 帳戶角度風險評估（槓桿放大效應）──
         leverage = self.config.leverage
         sl_pct = sl_distance / price
-        account_risk_pct = sl_pct * leverage * self.config.max_position_pct
+        pos_pct = self.effective_max_position_pct
+        account_risk_pct = sl_pct * leverage * pos_pct
         max_single_trade_risk = self.config.max_daily_loss_pct / 2
         if account_risk_pct > max_single_trade_risk:
             reason = (
                 f"單筆帳戶風險過高: {account_risk_pct:.2%} > {max_single_trade_risk:.2%} "
-                f"(SL={sl_pct:.2%} × {leverage}x × {self.config.max_position_pct:.1%})"
+                f"(SL={sl_pct:.2%} × {leverage}x × {pos_pct:.1%})"
             )
             logger.warning(reason)
             return FuturesRiskOutput(approved=False, reason=reason)
@@ -428,7 +447,7 @@ class FuturesRiskManager:
                 return FuturesRiskOutput(approved=False, reason=reason)
 
         # ── 6. 槓桿感知部位計算（根據 horizon 調整）──
-        notional = available_margin * self.config.max_position_pct * leverage * hp["size_factor"]
+        notional = available_margin * pos_pct * leverage * hp["size_factor"]
         quantity = notional / price
 
         # LLM 建議的倉位佔比（取較保守者）

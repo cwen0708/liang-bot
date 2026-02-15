@@ -40,6 +40,7 @@ from bot.logging_config.logger import attach_supabase_handler, setup_logging
 from bot.risk.manager import RiskManager
 from bot.risk.futures_manager import FuturesRiskManager
 from bot.spot_handler import SpotHandler
+from bot.tx_handler import TXAnalysisHandler, is_tx_session_active
 from bot.strategy.base import BaseStrategy, Strategy
 from bot.strategy.router import StrategyRouter
 from bot.strategy.signals import Signal, StrategyVerdict
@@ -396,6 +397,12 @@ class TradingBot:
         )
         self._llm_semaphore = threading.Semaphore(3)  # LLM 並行上限
 
+        # ── 台指期分析（純分析，不交易）──
+        self._tx_enabled = self.settings.tx.enabled
+        self._tx_handler: TXAnalysisHandler | None = None
+        if self._tx_enabled:
+            self._init_tx_analysis()
+
         # ── 每日復盤 ──
         from bot.review.reviewer import DailyReviewer
         self._reviewer = DailyReviewer(db=self._db, llm_client=self._llm_client)
@@ -470,6 +477,20 @@ class TradingBot:
                 )
         if rows:
             logger.info("已從 Supabase 恢復 %d 筆合約 %s 模式持倉", len(rows), mode)
+
+    def _init_tx_analysis(self) -> None:
+        """初始化台灣加權指數分析模組。"""
+        from bot.exchange.yahoo_finance_client import YahooFinanceClient
+
+        tx_cfg = self.settings.tx
+        yf_client = YahooFinanceClient(symbol=tx_cfg.symbol)
+        tx_data_fetcher = DataFetcher(yf_client)
+        self._tx_handler = TXAnalysisHandler(
+            settings=self.settings,
+            data_fetcher=tx_data_fetcher,
+            db=self._db,
+        )
+        logger.info("  [TX] 台指期分析已啟用 (symbol=%s)", tx_cfg.symbol)
 
     def _create_all_strategies(self) -> None:
         """根據 config 建立所有策略（OHLCV + 訂單流），統一存入 self.strategies。"""
@@ -605,6 +626,10 @@ class TradingBot:
             logger.info("  [合約] 啟用 (交易對=%s, %dx, %s)", fc.pairs, fc.leverage, fc.mode.value)
         else:
             logger.info("  [合約] 停用")
+        if self._tx_enabled:
+            logger.info("  [TX]  啟用 (symbol=%s, 日盤 08:45-13:45)", self.settings.tx.symbol)
+        else:
+            logger.info("  [TX]  停用")
 
         self._start_time = time.monotonic()
         cycle = self._db.get_last_cycle_num()
@@ -751,6 +776,18 @@ class TradingBot:
             elif self._loan_guardian:
                 self._loan_guardian.config = self.settings.loan_guard
 
+            # TX 熱重載
+            if self.settings.tx.enabled and not self._tx_enabled:
+                self._tx_enabled = True
+                self._init_tx_analysis()
+                logger.info("TX 分析模組已啟用")
+            elif not self.settings.tx.enabled and self._tx_enabled:
+                self._tx_enabled = False
+                self._tx_handler = None
+                logger.info("TX 分析模組已停用")
+            elif self._tx_handler:
+                self._tx_handler._settings = self.settings
+
             # 策略熱重載：偵測策略清單或參數變更
             new_fp = self._get_strategy_fingerprint()
             if new_fp != self._strategy_fingerprint:
@@ -779,7 +816,8 @@ class TradingBot:
                 logger.exception("%s處理時發生錯誤", _L1)
 
         if self._futures_enabled and self._futures_handler:
-            for symbol in self.settings.futures.pairs:
+            active_pairs = self._futures_handler.resolve_active_pairs()
+            for symbol in active_pairs:
                 try:
                     self._futures_handler.process_symbol(
                         symbol, cycle_id, cycle, self._futures_strategies,
@@ -793,6 +831,18 @@ class TradingBot:
             except Exception:
                 logger.debug("合約保證金快照失敗", exc_info=True)
 
+        # ── 台指期分析 ──
+        if self._tx_enabled and self._tx_handler:
+            if is_tx_session_active():
+                try:
+                    self._tx_handler.process_symbol(
+                        self.settings.tx.symbol, cycle_id, cycle, self.strategies,
+                    )
+                except Exception:
+                    logger.exception("%s[TX] 分析處理錯誤", _L1)
+            else:
+                logger.debug("%s[TX] 非交易時段，跳過", _L1)
+
     def _process_symbols_parallel(self, cycle_id: str, cycle: int) -> None:
         """並行處理所有交易對（ThreadPoolExecutor）。"""
         futures = []
@@ -804,7 +854,8 @@ class TradingBot:
             futures.append(("spot", symbol, fut))
 
         if self._futures_enabled and self._futures_handler:
-            for symbol in self.settings.futures.pairs:
+            active_pairs = self._futures_handler.resolve_active_pairs()
+            for symbol in active_pairs:
                 fut = self._thread_pool.submit(
                     self._safe_process_futures, symbol, cycle_id, cycle,
                 )
@@ -823,6 +874,18 @@ class TradingBot:
                 self._futures_handler.record_margin()
             except Exception:
                 logger.debug("合約保證金快照失敗", exc_info=True)
+
+        # ── 台指期分析（單一 symbol，不需並行）──
+        if self._tx_enabled and self._tx_handler:
+            if is_tx_session_active():
+                try:
+                    self._tx_handler.process_symbol(
+                        self.settings.tx.symbol, cycle_id, cycle, self.strategies,
+                    )
+                except Exception:
+                    logger.exception("%s[TX] 分析處理錯誤", _L1)
+            else:
+                logger.debug("%s[TX] 非交易時段，跳過", _L1)
 
     def _safe_process_spot(self, symbol: str, cycle_id: str, cycle: int) -> None:
         """Thread-safe wrapper for spot symbol processing."""

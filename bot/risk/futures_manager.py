@@ -85,6 +85,7 @@ class FuturesRiskManager:
         entry_price: float, leverage: int = 1,
         tp_order_id: str | None = None, sl_order_id: str | None = None,
         stop_loss_price: float = 0.0, take_profit_price: float = 0.0,
+        entry_horizon: str = "", entry_reasoning: str = "",
     ) -> None:
         """確認預留 slot 並轉為正式持倉。"""
         pos_key = self._pos_key(symbol, side)
@@ -100,6 +101,8 @@ class FuturesRiskManager:
                 "sl_order_id": sl_order_id,
                 "stop_loss_price": stop_loss_price,
                 "take_profit_price": take_profit_price,
+                "entry_horizon": entry_horizon,
+                "entry_reasoning": entry_reasoning,
             }
         side_label = "多" if side == "long" else "空"
         logger.info(
@@ -528,6 +531,8 @@ class FuturesRiskManager:
         sl_order_id: str | None = None,
         stop_loss_price: float = 0.0,
         take_profit_price: float = 0.0,
+        entry_horizon: str = "",
+        entry_reasoning: str = "",
     ) -> None:
         """記錄新持倉（含 SL/TP 價位）。
 
@@ -547,6 +552,8 @@ class FuturesRiskManager:
                 "sl_order_id": sl_order_id,
                 "stop_loss_price": stop_loss_price,
                 "take_profit_price": take_profit_price,
+                "entry_horizon": entry_horizon,
+                "entry_reasoning": entry_reasoning,
             }
         side_label = "多" if side == "long" else "空"
         logger.info(

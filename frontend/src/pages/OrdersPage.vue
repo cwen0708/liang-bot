@@ -149,10 +149,12 @@ const filteredPairs = computed(() => {
 const pairStats = computed(() => {
   const closed = filteredPairs.value.filter(p => p.status === 'closed')
   const open = filteredPairs.value.filter(p => p.status === 'open')
-  const totalPnl = closed.reduce((sum, p) => sum + p.pnl, 0)
+  const realizedPnl = closed.reduce((sum, p) => sum + p.pnl, 0)
+  const unrealizedPnl = open.reduce((sum, p) => sum + p.pnl, 0)
+  const totalPnl = realizedPnl + unrealizedPnl
   const wins = closed.filter(p => p.pnl > 0).length
   const winRate = closed.length > 0 ? (wins / closed.length) * 100 : 0
-  return { closedCount: closed.length, openCount: open.length, totalPnl, wins, losses: closed.length - wins, winRate }
+  return { closedCount: closed.length, openCount: open.length, realizedPnl, unrealizedPnl, totalPnl, winRate }
 })
 
 // ─── Symbol groups: group pairs by symbol ───────────────────
@@ -317,6 +319,124 @@ function pnlColor(val: number): string {
 function pnlSign(val: number): string {
   return val >= 0 ? '+' : ''
 }
+
+// ─── Mini price range chart ─────────────────────────────
+interface PricePoint { x: number; color: string; label: string; price: number }
+interface PriceRangeResult { points: PricePoint[]; rangeX: number; rangeW: number }
+
+function priceRangePoints(pos: { symbol: string; entry_price: number; current_price: number; stop_loss?: number | null; take_profit?: number | null }, width: number): PriceRangeResult | null {
+  const entry = pos.entry_price
+  const live = livePrice(pos.symbol, pos.current_price)
+  const sl = pos.stop_loss ?? 0
+  const tp = pos.take_profit ?? 0
+
+  if (!entry || !live) return null
+
+  const corePrices: number[] = [entry, live]
+  if (sl > 0) corePrices.push(sl)
+  if (tp > 0) corePrices.push(tp)
+
+  const min = Math.min(...corePrices)
+  const max = Math.max(...corePrices)
+  if (max <= min) return null
+
+  const range = max - min
+  const padMin = min - range * 0.15
+  const padMax = max + range * 0.15
+  const padRange = padMax - padMin
+
+  const toX = (p: number) => Math.max(4, Math.min(width - 4, ((p - padMin) / padRange) * width))
+
+  const points: PricePoint[] = []
+  if (sl > 0) points.push({ x: toX(sl), color: 'var(--color-danger)', label: 'SL', price: sl })
+  points.push({ x: toX(entry), color: 'var(--color-text-muted)', label: 'Entry', price: entry })
+  points.push({ x: toX(live), color: 'var(--color-accent)', label: 'Live', price: live })
+  if (tp > 0) points.push({ x: toX(tp), color: 'var(--color-success)', label: 'TP', price: tp })
+
+  points.sort((a, b) => a.x - b.x)
+
+  const slPt = points.find(p => p.label === 'SL')
+  const tpPt = points.find(p => p.label === 'TP')
+  let rangeX = 0, rangeW = 0
+  if (slPt && tpPt) {
+    rangeX = Math.min(slPt.x, tpPt.x)
+    rangeW = Math.abs(tpPt.x - slPt.x)
+  }
+
+  return { points, rangeX, rangeW }
+}
+
+// ─── Copy page text ─────────────────────────────────────
+const copySuccess = ref(false)
+
+function exportPageText(): string {
+  const lines: string[] = []
+
+  // USDT balance
+  const usdtBal = bot.balances.find(b => b.currency === 'USDT')
+  if (usdtBal) {
+    lines.push(`USDT 餘額: ${usdtBal.free.toFixed(2)}`)
+    lines.push('')
+  }
+
+  // Positions
+  const positions = filteredPositions.value
+  if (positions.length) {
+    lines.push(`持倉 (${positions.length})`)
+    for (const pos of positions) {
+      const { pnl, pnlPct } = calcPnl(pos)
+      const price = livePrice(pos.symbol, pos.current_price)
+      lines.push(`  ${pos.symbol} | 數量 ${pos.quantity.toFixed(6)} | 入場 $${pos.entry_price.toFixed(2)} | 現價 $${price.toFixed(2)} | PnL ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)${pos.stop_loss ? ` | SL $${pos.stop_loss.toFixed(2)}` : ''}${pos.take_profit ? ` | TP $${pos.take_profit.toFixed(2)}` : ''}`)
+    }
+    lines.push('')
+  }
+
+  // Trade pairs
+  const stats = pairStats.value
+  lines.push('交易紀錄')
+  lines.push(`已結 ${stats.closedCount} 筆 | 勝率 ${stats.winRate.toFixed(0)}% | 已實現 ${stats.realizedPnl >= 0 ? '+' : ''}${stats.realizedPnl.toFixed(2)} | 未實現 ${stats.unrealizedPnl >= 0 ? '+' : ''}${stats.unrealizedPnl.toFixed(2)} | 總損益 ${stats.totalPnl >= 0 ? '+' : ''}${stats.totalPnl.toFixed(2)} USDT | 持倉中 ${stats.openCount}`)
+  lines.push('')
+
+  for (const group of symbolGroups.value) {
+    lines.push(`${group.symbol}`)
+    lines.push(`${group.pairs.length} 筆 | ${group.openCount} 持倉中 | ${group.totalPnl >= 0 ? '+' : ''}${group.totalPnl.toFixed(2)} USDT`)
+    lines.push('#\t狀態\t入場\t出場\t數量\t損益\t持倉時間')
+    for (let i = 0; i < group.pairs.length; i++) {
+      const pair = group.pairs[i]!
+      const num = group.pairs.length - i
+      const status = pair.status === 'closed' ? '已結' : '持倉中'
+      const entry = `$${pair.entryPrice.toFixed(2)} (${formatDateShort(pair.buyOrder.created_at)})`
+      const exit = pair.sellOrder
+        ? `$${pair.exitPrice!.toFixed(2)} (${formatDateShort(pair.sellOrder.created_at)})`
+        : `$${livePrice(pair.symbol, pair.entryPrice).toFixed(2)} (至今)`
+      const pnlStr = `${pair.pnl >= 0 ? '+' : ''}${pair.pnl.toFixed(2)} (${pair.pnlPct >= 0 ? '+' : ''}${pair.pnlPct.toFixed(2)}%)`
+      lines.push(`${num}\t${status}\t${entry}\t${exit}\t${pair.quantity.toFixed(6)}\t${pnlStr}\t${formatDuration(pair.holdDurationMs)}`)
+    }
+    lines.push('')
+  }
+
+  return lines.join('\n')
+}
+
+async function copyPageText() {
+  const text = exportPageText()
+  try {
+    await navigator.clipboard.writeText(text)
+    copySuccess.value = true
+    setTimeout(() => { copySuccess.value = false }, 2000)
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    copySuccess.value = true
+    setTimeout(() => { copySuccess.value = false }, 2000)
+  }
+}
 </script>
 
 <template>
@@ -325,6 +445,16 @@ function pnlSign(val: number): string {
     <div class="flex items-center justify-between gap-2 shrink-0 flex-wrap">
       <h2 class="text-2xl md:text-3xl font-bold">現貨</h2>
       <div class="flex items-center gap-2">
+        <!-- Copy button -->
+        <button
+          class="p-1.5 rounded-lg transition-colors"
+          :class="copySuccess ? 'text-(--color-success) bg-(--color-success)/10' : 'text-(--color-text-secondary) hover:bg-(--color-bg-secondary)'"
+          title="複製頁面資訊"
+          @click="copyPageText"
+        >
+          <svg v-if="!copySuccess" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+          <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </button>
         <!-- View mode toggle -->
         <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
           <button
@@ -371,10 +501,53 @@ function pnlSign(val: number): string {
 
     <!-- Scrollable content -->
     <div class="flex flex-col gap-4 md:gap-5 min-h-0 md:flex-1 md:overflow-auto">
+
+    <!-- Summary Cards -->
+    <div class="grid grid-cols-3 md:grid-cols-5 gap-2 md:gap-3">
+      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
+        <div class="text-xs text-(--color-text-secondary)">USDT 餘額</div>
+        <div class="text-lg md:text-xl font-bold font-mono mt-0.5">
+          {{ bot.balances.find(b => b.currency === 'USDT')?.free.toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '--' }}
+        </div>
+      </div>
+
+      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
+        <div class="text-xs text-(--color-text-secondary)">已實現損益</div>
+        <div class="text-lg md:text-xl font-bold font-mono mt-0.5" :class="pnlColor(pairStats.realizedPnl)">
+          {{ pnlSign(pairStats.realizedPnl) }}{{ pairStats.realizedPnl.toFixed(2) }}
+        </div>
+        <div class="text-[11px] text-(--color-text-muted) mt-0.5">勝率 {{ pairStats.winRate.toFixed(0) }}%</div>
+      </div>
+
+      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
+        <div class="text-xs text-(--color-text-secondary)">未實現損益</div>
+        <div class="text-lg md:text-xl font-bold font-mono mt-0.5" :class="pnlColor(pairStats.unrealizedPnl)">
+          {{ pnlSign(pairStats.unrealizedPnl) }}{{ pairStats.unrealizedPnl.toFixed(2) }}
+        </div>
+        <div class="text-[11px] text-(--color-text-muted) mt-0.5">{{ pairStats.openCount }} 筆持倉中</div>
+      </div>
+
+      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
+        <div class="text-xs text-(--color-text-secondary)">總損益</div>
+        <div class="text-lg md:text-xl font-bold font-mono mt-0.5" :class="pnlColor(pairStats.totalPnl)">
+          {{ pnlSign(pairStats.totalPnl) }}{{ pairStats.totalPnl.toFixed(2) }}
+        </div>
+        <div class="text-[11px] text-(--color-text-muted) mt-0.5">USDT</div>
+      </div>
+
+      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
+        <div class="text-xs text-(--color-text-secondary)">總資產</div>
+        <div class="text-lg md:text-xl font-bold font-mono mt-0.5">
+          {{ bot.totalUsdt?.toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '--' }}
+        </div>
+        <div class="text-[11px] text-(--color-text-muted) mt-0.5">USDT</div>
+      </div>
+    </div>
+
       <!-- ===== Positions: horizontal scroll ===== -->
       <section class="shrink-0">
         <div class="flex items-center justify-between mb-2">
-          <h3 class="text-lg font-semibold text-(--color-text-primary)">持倉</h3>
+          <h3 class="text-lg font-semibold text-(--color-text-primary)">持倉 <span class="text-sm font-normal text-(--color-text-muted)">{{ filteredPositions.length }}</span></h3>
           <button
             v-if="filterSymbol"
             class="text-xs text-(--color-accent) hover:underline"
@@ -430,6 +603,27 @@ function pnlSign(val: number): string {
                   <span class="text-(--color-success) font-medium">${{ pos.take_profit.toFixed(2) }}</span>
                 </div>
               </div>
+              <!-- Mini price range chart -->
+              <div v-if="priceRangePoints(pos, 190)" class="mt-2 pt-2 border-t border-(--color-border)/30">
+                <svg width="190" height="24" class="w-full" viewBox="0 0 190 24">
+                  <line x1="0" y1="12" x2="190" y2="12" stroke="var(--color-border)" stroke-width="1" />
+                  <rect v-if="priceRangePoints(pos, 190)!.rangeW > 0"
+                    :x="priceRangePoints(pos, 190)!.rangeX" y="8" :width="priceRangePoints(pos, 190)!.rangeW"
+                    height="8" rx="3" fill="var(--color-text-muted)" opacity="0.1"
+                  />
+                  <template v-for="pt in priceRangePoints(pos, 190)!.points" :key="pt.label">
+                    <template v-if="pt.label === 'Live'">
+                      <circle :cx="pt.x" cy="12" r="5" :fill="pt.color" opacity="0.15" />
+                      <circle :cx="pt.x" cy="12" r="3.5" :fill="pt.color" />
+                      <text :x="pt.x" y="22" text-anchor="middle" :fill="pt.color" font-size="7" font-weight="600">{{ pt.label }}</text>
+                    </template>
+                    <template v-else>
+                      <circle :cx="pt.x" cy="12" r="2.5" :fill="pt.color" />
+                      <text :x="pt.x" y="22" text-anchor="middle" :fill="pt.color" font-size="7" font-weight="500">{{ pt.label }}</text>
+                    </template>
+                  </template>
+                </svg>
+              </div>
             </div>
           </div>
         </div>
@@ -439,20 +633,11 @@ function pnlSign(val: number): string {
       <section v-if="viewMode === 'pairs'" class="flex flex-col min-h-0">
         <div class="flex items-center justify-between mb-2 shrink-0">
           <h3 class="text-lg font-semibold text-(--color-text-primary)">
-            交易紀錄
+            交易紀錄 <span class="text-sm font-normal text-(--color-text-muted)">{{ filteredPairs.length }}</span>
             <span v-if="filterSymbol" class="text-sm font-normal text-(--color-accent) ml-2">{{ filterSymbol }}</span>
           </h3>
         </div>
 
-        <!-- Stats bar -->
-        <div v-if="filteredPairs.length" class="flex items-center gap-4 text-sm mb-3 flex-wrap shrink-0">
-          <span class="text-(--color-text-secondary)">已結 <span class="font-medium text-(--color-text-primary)">{{ pairStats.closedCount }}</span> 筆</span>
-          <span v-if="pairStats.closedCount" class="text-(--color-text-secondary)">勝率 <span class="font-medium text-(--color-text-primary)">{{ pairStats.winRate.toFixed(0) }}%</span></span>
-          <span v-if="pairStats.closedCount" :class="pnlColor(pairStats.totalPnl)">
-            總損益 <span class="font-bold">{{ pnlSign(pairStats.totalPnl) }}{{ pairStats.totalPnl.toFixed(2) }} USDT</span>
-          </span>
-          <span v-if="pairStats.openCount" class="text-(--color-accent)">持倉中 {{ pairStats.openCount }}</span>
-        </div>
 
         <div class="flex flex-col gap-3">
           <div v-if="loading" class="text-base text-(--color-text-secondary) bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4">載入中...</div>

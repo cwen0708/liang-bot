@@ -307,13 +307,18 @@ class SpotHandler:
             if decision_result.llm_override and risk_output.quantity > 0:
                 risk_output.quantity /= 2
                 logger.info("%s[現貨][覆蓋] 倉位縮半: %.6f", _L2, risk_output.quantity)
-            self._execute_buy(symbol, current_price, risk_output, cycle_id)
+            self._execute_buy(
+                symbol, current_price, risk_output, cycle_id,
+                entry_horizon=horizon,
+                entry_reasoning=decision_result.reasoning,
+            )
 
         elif final_signal == Signal.SELL:
             self._execute_sell(symbol, current_price, cycle_id)
 
     def _execute_buy(
         self, symbol: str, price: float, risk_output, cycle_id: str = "",
+        entry_horizon: str = "", entry_reasoning: str = "",
     ) -> None:
         order = self._executor.execute(Signal.BUY, symbol, risk_output)
         if order:
@@ -336,6 +341,8 @@ class SpotHandler:
                 sl_order_id=sl_order_id,
                 stop_loss_price=risk_output.stop_loss_price,
                 take_profit_price=risk_output.take_profit_price,
+                entry_horizon=entry_horizon,
+                entry_reasoning=entry_reasoning,
             )
             self._order_manager.add_order(order)
             _mode = self._settings.spot.mode.value
@@ -347,6 +354,8 @@ class SpotHandler:
                 "unrealized_pnl": 0,
                 "stop_loss": risk_output.stop_loss_price,
                 "take_profit": risk_output.take_profit_price,
+                "entry_horizon": entry_horizon,
+                "entry_reasoning": entry_reasoning,
             }, mode=_mode)
             logger.info(
                 "%s[現貨] ✓ BUY %s @ %.2f, qty=%.8f (SL=%.2f, TP=%.2f)",
@@ -364,6 +373,20 @@ class SpotHandler:
 
         risk_output = self._risk.evaluate(Signal.SELL, symbol, price, 0)
         if not risk_output.approved:
+            return
+
+        # 小額持倉檢查：名義價值低於交易所最低門檻時直接內部清理
+        notional = risk_output.quantity * price
+        min_notional = self._exchange.get_min_notional(symbol)
+        if min_notional > 0 and notional < min_notional:
+            logger.info(
+                "%s[現貨] 持倉名義值 $%.4f < 最低 $%.2f，跳過下單直接清理 %s",
+                _L3, notional, min_notional, symbol,
+            )
+            pnl = self._risk.remove_position(symbol, price)
+            _mode = self._settings.spot.mode.value
+            self._db.delete_position(symbol, mode=_mode)
+            logger.info("%s[現貨] ✓ 清理小額持倉 %s, PnL=%.4f USDT", _L3, symbol, pnl)
             return
 
         order = self._executor.execute(Signal.SELL, symbol, risk_output)
@@ -429,6 +452,8 @@ class SpotHandler:
                 current_price=price,
                 unrealized_pnl=pnl,
                 unrealized_pnl_pct=pnl_pct,
+                entry_horizon=pos_data.get("entry_horizon", ""),
+                entry_reasoning=pos_data.get("entry_reasoning", ""),
             ))
 
         sc = self._settings.spot

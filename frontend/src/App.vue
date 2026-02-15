@@ -26,6 +26,7 @@ const navItems = [
   { to: '/strategy', label: '策略', icon: 'strategy' },
   { to: '/orders', label: '現貨', icon: 'orders' },
   { to: '/futures', label: '合約', icon: 'futures' },
+  { to: '/review', label: '復盤', icon: 'review' },
   { to: '/loan-guard', label: '借貸', icon: 'shield' },
   { to: '/logs', label: '日誌', icon: 'logs' },
   { to: '/config', label: '設定', icon: 'config' },
@@ -94,6 +95,10 @@ const mobileTabItems = [
             <!-- Strategy -->
             <template v-else-if="item.icon === 'strategy'">
               <circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="3" /><line x1="12" y1="2" x2="12" y2="5" /><line x1="12" y1="19" x2="12" y2="22" />
+            </template>
+            <!-- Review -->
+            <template v-else-if="item.icon === 'review'">
+              <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" /><rect x="9" y="3" width="6" height="4" rx="1" /><line x1="9" y1="12" x2="15" y2="12" /><line x1="9" y1="16" x2="13" y2="16" />
             </template>
             <!-- Shield -->
             <template v-else-if="item.icon === 'shield'">

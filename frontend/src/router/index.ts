@@ -24,6 +24,11 @@ const router = createRouter({
       component: () => import('@/pages/StrategyPage.vue'),
     },
     {
+      path: '/review',
+      name: 'review',
+      component: () => import('@/pages/ReviewPage.vue'),
+    },
+    {
       path: '/loan-guard',
       name: 'loan-guard',
       component: () => import('@/pages/LoanGuardPage.vue'),

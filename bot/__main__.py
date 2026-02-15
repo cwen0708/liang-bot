@@ -58,6 +58,11 @@ def main() -> None:
     cp_parser.add_argument("--config", default=None, help="配置檔路徑")
     cp_parser.add_argument("--note", default="", help="變更說明")
 
+    # review
+    review_parser = subparsers.add_parser("review", help="執行每日復盤檢討")
+    review_parser.add_argument("--mode", default="live", choices=["live", "paper"], help="交易模式")
+    review_parser.add_argument("--hours", type=int, default=24, help="回顧時數 (預設 24)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -82,6 +87,8 @@ def main() -> None:
         cmd_validate()
     elif args.command == "config-push":
         cmd_config_push(args)
+    elif args.command == "review":
+        cmd_review(args)
 
 
 def cmd_run(args) -> None:
@@ -713,6 +720,59 @@ def cmd_config_push(args) -> None:
         print(f"  變更說明: {note}")
     except Exception as e:
         print(f"推送失敗: {e}")
+        sys.exit(1)
+
+
+def cmd_review(args) -> None:
+    from bot.config.settings import Settings
+    from bot.db.supabase_client import SupabaseWriter
+    from bot.llm.client import ClaudeCLIClient
+    from bot.logging_config import setup_logging
+    from bot.review.reviewer import DailyReviewer
+
+    settings = Settings.load()
+    setup_logging(level="INFO")
+
+    db = SupabaseWriter()
+    if not db._enabled:
+        print("Supabase 未連線，無法執行復盤")
+        sys.exit(1)
+
+    # 復盤使用較長的 timeout
+    from bot.config.settings import LLMConfig
+    review_llm_config = LLMConfig(
+        enabled=True,
+        cli_path=settings.llm.cli_path,
+        model=settings.llm.model,
+        timeout=120,
+    )
+    llm_client = ClaudeCLIClient(review_llm_config)
+
+    reviewer = DailyReviewer(db=db, llm_client=llm_client)
+
+    print(f"開始復盤 (mode={args.mode}, hours={args.hours})...")
+    result = reviewer.run(mode=args.mode, hours=args.hours)
+
+    if result:
+        print("\n" + "=" * 60)
+        print(result.get("summary", "(無報告)"))
+        print("=" * 60)
+
+        scores = result.get("scores", {})
+        print(f"\n整體評分: {scores.get('overall', 0) * 100:.0f}%")
+        print(f"  策略準確率: {scores.get('strategy_accuracy', 0) * 100:.0f}%")
+        print(f"  風控執行:   {scores.get('risk_execution', 0) * 100:.0f}%")
+        print(f"  損益表現:   {scores.get('pnl_performance', 0) * 100:.0f}%")
+        print(f"  Prompt 品質: {scores.get('prompt_quality', 0) * 100:.0f}%")
+
+        suggestions = result.get("suggestions", [])
+        if suggestions:
+            print(f"\n改進建議 ({len(suggestions)} 項):")
+            for s in suggestions:
+                print(f"  [{s.get('priority', '?')}] {s.get('title', '')}")
+                print(f"         {s.get('action', '')}")
+    else:
+        print("復盤失敗，請檢查日誌")
         sys.exit(1)
 
 

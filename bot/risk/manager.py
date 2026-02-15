@@ -81,6 +81,7 @@ class RiskManager:
         self, symbol: str, quantity: float, entry_price: float,
         tp_order_id: str | None = None, sl_order_id: str | None = None,
         stop_loss_price: float = 0.0, take_profit_price: float = 0.0,
+        entry_horizon: str = "", entry_reasoning: str = "",
     ) -> None:
         """確認預留 slot 並轉為正式持倉。"""
         with self._lock:
@@ -92,6 +93,8 @@ class RiskManager:
                 "sl_order_id": sl_order_id,
                 "stop_loss_price": stop_loss_price,
                 "take_profit_price": take_profit_price,
+                "entry_horizon": entry_horizon,
+                "entry_reasoning": entry_reasoning,
             }
         logger.info(
             "確認持倉: %s qty=%.8f entry=%.2f SL=%.2f TP=%.2f",
@@ -405,6 +408,8 @@ class RiskManager:
         sl_order_id: str | None = None,
         stop_loss_price: float = 0.0,
         take_profit_price: float = 0.0,
+        entry_horizon: str = "",
+        entry_reasoning: str = "",
     ) -> None:
         """記錄新持倉（含 SL/TP 價位和掛單 ID）。
 
@@ -420,6 +425,8 @@ class RiskManager:
                 "sl_order_id": sl_order_id,
                 "stop_loss_price": stop_loss_price,
                 "take_profit_price": take_profit_price,
+                "entry_horizon": entry_horizon,
+                "entry_reasoning": entry_reasoning,
             }
         logger.info(
             "新增持倉: %s qty=%.8f entry=%.2f SL=%.2f TP=%.2f",

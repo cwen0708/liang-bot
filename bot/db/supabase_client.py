@@ -191,6 +191,8 @@ class SupabaseWriter:
                 "unrealized_pnl": data.get("unrealized_pnl", 0),
                 "stop_loss": data.get("stop_loss"),
                 "take_profit": data.get("take_profit"),
+                "entry_horizon": data.get("entry_horizon", ""),
+                "entry_reasoning": data.get("entry_reasoning", ""),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }, on_conflict="symbol,mode,market_type,side").execute()
         except Exception as e:
@@ -202,7 +204,7 @@ class SupabaseWriter:
         if not self._enabled:
             return []
         try:
-            cols = "symbol, quantity, entry_price, stop_loss, take_profit, side, leverage"
+            cols = "symbol, quantity, entry_price, stop_loss, take_profit, side, leverage, entry_horizon, entry_reasoning"
             resp = (
                 self._client.table("positions")
                 .select(cols)
@@ -458,3 +460,29 @@ class SupabaseWriter:
             }).execute()
         except Exception as e:
             logger.debug("寫入 futures_margin 失敗: %s", e)
+
+    # ─── Daily Review ───
+
+    def insert_daily_review(self, review_date, mode: str, summary: str,
+                            scores: dict, suggestions: list,
+                            input_stats: dict, model: str,
+                            market_type: str = "all") -> None:
+        """寫入每日復盤結果（upsert，同天同模式覆蓋）。"""
+        if not self._enabled:
+            return
+        try:
+            self._client.table("daily_reviews").upsert(
+                {
+                    "review_date": str(review_date),
+                    "mode": mode,
+                    "market_type": market_type,
+                    "model": model,
+                    "summary": summary,
+                    "scores": scores,
+                    "suggestions": suggestions,
+                    "input_stats": input_stats,
+                },
+                on_conflict="review_date,mode,market_type",
+            ).execute()
+        except Exception as e:
+            logger.error("寫入 daily_reviews 失敗: %s", e)

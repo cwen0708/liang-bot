@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useSupabase } from '@/composables/useSupabase'
 import type { LLMDecision, StrategyVerdict, Order } from '@/types'
 
@@ -15,6 +15,8 @@ const supabase = useSupabase()
 const verdicts = ref<StrategyVerdict[]>([])
 const orders = ref<Order[]>([])
 const loading = ref(false)
+const selectedTimeframe = ref<string | null>(null)
+const verdictCache = new Map<string, StrategyVerdict[]>()
 
 const allStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'macd_momentum', 'vwap_reversion', 'ema_ribbon', 'tia_orderflow']
 const strategyLabel: Record<string, string> = {
@@ -33,7 +35,24 @@ type VerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
 watch(() => props.decision, async (d) => {
   verdicts.value = []
   orders.value = []
+  selectedTimeframe.value = null
   if (!d?.cycle_id) return
+
+  const cacheKey = `${d.cycle_id}:${d.symbol}`
+  const cached = verdictCache.get(cacheKey)
+  if (cached) {
+    verdicts.value = cached
+    // orders still need fresh query (may change)
+    const { data } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('cycle_id', d.cycle_id)
+      .eq('symbol', d.symbol)
+      .order('created_at', { ascending: false })
+    if (data) orders.value = data as Order[]
+    return
+  }
+
   loading.value = true
   const [verdictRes, orderRes] = await Promise.all([
     supabase
@@ -48,13 +67,27 @@ watch(() => props.decision, async (d) => {
       .eq('symbol', d.symbol)
       .order('created_at', { ascending: false }),
   ])
-  if (verdictRes.data) verdicts.value = verdictRes.data as StrategyVerdict[]
+  if (verdictRes.data) {
+    verdicts.value = verdictRes.data as StrategyVerdict[]
+    verdictCache.set(cacheKey, verdicts.value)
+  }
   if (orderRes.data) orders.value = orderRes.data as Order[]
   loading.value = false
 })
 
-/** Per strategy, pick the verdict with the highest confidence */
+const availableTimeframes = computed(() => {
+  const tfs = new Set(verdicts.value.map(v => v.timeframe))
+  return ['15m', '1h', '4h', '1d'].filter(tf => tfs.has(tf))
+})
+
 function getVerdictSlots(): VerdictSlot[] {
+  if (selectedTimeframe.value) {
+    const filtered = verdicts.value.filter(v => v.timeframe === selectedTimeframe.value)
+    const map = new Map<string, StrategyVerdict>()
+    for (const v of filtered) map.set(v.strategy, v)
+    return allStrategies.map(s => ({ strategy: s, verdict: map.get(s) ?? null }))
+  }
+  // 預設：每策略取最高 confidence
   const best = new Map<string, StrategyVerdict>()
   for (const v of verdicts.value) {
     const prev = best.get(v.strategy)
@@ -176,7 +209,27 @@ function verdictBgStyle(signal: string, confidence: number): Record<string, stri
 
             <!-- Strategy verdicts -->
             <div v-if="loading" class="text-sm text-(--color-text-muted)">載入策略...</div>
-            <div v-else class="flex flex-col gap-2">
+            <template v-else>
+            <!-- Timeframe selector -->
+            <div v-if="availableTimeframes.length" class="flex items-center gap-1.5">
+              <button
+                class="px-2.5 py-1 text-xs rounded-full transition-colors"
+                :class="selectedTimeframe === null
+                  ? 'bg-(--color-accent) text-white font-medium'
+                  : 'bg-(--color-bg-secondary) text-(--color-text-muted) hover:text-(--color-text-secondary)'"
+                @click="selectedTimeframe = null"
+              >最佳</button>
+              <button
+                v-for="tf in availableTimeframes"
+                :key="tf"
+                class="px-2.5 py-1 text-xs rounded-full transition-colors"
+                :class="selectedTimeframe === tf
+                  ? 'bg-(--color-accent) text-white font-medium'
+                  : 'bg-(--color-bg-secondary) text-(--color-text-muted) hover:text-(--color-text-secondary)'"
+                @click="selectedTimeframe = tf"
+              >{{ tf }}</button>
+            </div>
+            <div class="flex flex-col gap-2">
               <div
                 v-for="slot in getVerdictSlots()"
                 :key="slot.strategy"
@@ -197,6 +250,7 @@ function verdictBgStyle(signal: string, confidence: number): Record<string, stri
                 <div v-if="slot.verdict?.reasoning" class="text-xs text-(--color-text-secondary) leading-relaxed">{{ slot.verdict.reasoning }}</div>
               </div>
             </div>
+            </template>
 
             <!-- Related orders -->
             <div v-if="orders.length" class="flex flex-col gap-2">

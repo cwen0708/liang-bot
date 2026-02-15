@@ -77,6 +77,8 @@ export interface Position {
   liquidation_price: number | null
   market_type: 'spot' | 'futures'
   margin_type: 'cross' | 'isolated'
+  entry_horizon: string
+  entry_reasoning: string
 }
 
 export interface FuturesFunding {
@@ -158,5 +160,34 @@ export interface AccountBalance {
   usdt_value: number
   snapshot_id: string
   mode: 'paper' | 'live'
+  created_at: string
+}
+
+export interface ReviewScores {
+  strategy_accuracy: number
+  risk_execution: number
+  pnl_performance: number
+  prompt_quality: number
+  overall: number
+}
+
+export interface ReviewSuggestion {
+  category: 'strategy' | 'risk' | 'config' | 'prompt'
+  priority: 'high' | 'medium' | 'low'
+  title: string
+  detail: string
+  action: string
+}
+
+export interface DailyReview {
+  id: number
+  review_date: string
+  market_type: string
+  mode: 'paper' | 'live'
+  model: string
+  summary: string
+  scores: ReviewScores
+  suggestions: ReviewSuggestion[]
+  input_stats: Record<string, number | string>
   created_at: string
 }

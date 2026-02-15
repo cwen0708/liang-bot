@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRealtimeTable } from '@/composables/useRealtime'
 import { useSupabase } from '@/composables/useSupabase'
 import { useBotStore } from '@/stores/bot'
 import DecisionDrawer from '@/components/DecisionDrawer.vue'
@@ -20,7 +19,16 @@ function decisionKey(d: LLMDecision) {
 async function fetchDecisions() {
   dLoading.value = true
   const { data } = await supabase.rpc('get_latest_decisions', { p_mode: bot.globalMode })
-  if (data) decisions.value = data as LLMDecision[]
+  if (data) {
+    decisions.value = data as LLMDecision[]
+    // RPC 附帶 verdicts jsonb，解析寫入快取
+    for (const d of decisions.value) {
+      const raw = (d as any).verdicts
+      if (raw && Array.isArray(raw) && raw.length) {
+        verdictCache.set(`${d.cycle_id}:${d.symbol}`, raw as StrategyVerdict[])
+      }
+    }
+  }
   dLoading.value = false
 }
 
@@ -43,6 +51,7 @@ const rtChannel = supabase
         newRow,
         ...decisions.value.filter(d => decisionKey(d) !== key),
       ]
+      fetchVerdictsForDecision(newRow)
     },
   )
   .subscribe()
@@ -51,23 +60,19 @@ onUnmounted(() => {
   supabase.removeChannel(rtChannel)
 })
 
-// ─── Verdicts ────────────────────────────────────
-const { rows: verdicts, loading: vLoading } = useRealtimeTable<StrategyVerdict>('strategy_verdicts', { limit: 5000 })
-
-// 卡片 verdict 找不到時，fallback 按 cycle_id 單獨撈（像 Drawer 一樣）
+// ─── Verdicts: 從 RPC 回傳中取得（快取 by cycle_id:symbol） ────
 const verdictCache = new Map<string, StrategyVerdict[]>()
 
-async function fetchVerdictsByCycle(cycleId: string, symbol: string): Promise<StrategyVerdict[]> {
-  const key = `${cycleId}:${symbol}`
-  if (verdictCache.has(key)) return verdictCache.get(key)!
+async function fetchVerdictsForDecision(d: LLMDecision) {
+  if (!d.cycle_id) return
+  const key = `${d.cycle_id}:${d.symbol}`
+  if (verdictCache.has(key)) return
   const { data } = await supabase
     .from('strategy_verdicts')
     .select('*')
-    .eq('cycle_id', cycleId)
-    .eq('symbol', symbol)
-  const result = (data as StrategyVerdict[]) ?? []
-  verdictCache.set(key, result)
-  return result
+    .eq('cycle_id', d.cycle_id)
+    .eq('symbol', d.symbol)
+  if (data?.length) verdictCache.set(key, data as StrategyVerdict[])
 }
 
 onMounted(() => {
@@ -140,18 +145,8 @@ const strategyLabel: Record<string, string> = {
 type VerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
 
 function getVerdictSlots(decision: LLMDecision): VerdictSlot[] {
-  let matched = verdicts.value.filter(v => v.cycle_id === decision.cycle_id && v.symbol === decision.symbol)
-
-  if (!matched.length) {
-    const key = `${decision.cycle_id}:${decision.symbol}`
-    if (verdictCache.has(key)) {
-      matched = verdictCache.get(key)!
-    } else {
-      fetchVerdictsByCycle(decision.cycle_id, decision.symbol).then(data => {
-        if (data.length) verdicts.value = [...verdicts.value, ...data]
-      })
-    }
-  }
+  const key = `${decision.cycle_id}:${decision.symbol}`
+  const matched = verdictCache.get(key) ?? []
 
   const best = new Map<string, StrategyVerdict>()
   for (const v of matched) {
@@ -270,7 +265,7 @@ const drawerDecision = ref<LLMDecision | null>(null)
     </div>
 
     <!-- Loading -->
-    <div v-if="dLoading || vLoading" class="text-base text-(--color-text-secondary)">載入中...</div>
+    <div v-if="dLoading" class="text-base text-(--color-text-secondary)">載入中...</div>
     <div v-else-if="!spotSymbols.length && !futuresSymbols.length" class="text-base text-(--color-text-secondary)">無記錄</div>
 
     <!-- Content: vertically scrollable -->

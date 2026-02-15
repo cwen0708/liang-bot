@@ -361,6 +361,13 @@ class BinanceClient(BaseExchange):
             return info["min_qty"]
         return 0.0
 
+    def get_min_notional(self, symbol: str) -> float:
+        """取得交易對的最小名義價值（NOTIONAL filter）。"""
+        info = self._market_info.get(symbol)
+        if info:
+            return info.get("min_notional", 0.0)
+        return 0.0
+
     def _round_step(self, value: float, step: float) -> float:
         """根據 step_size/tick_size 截斷數值（向下取整，避免超出精度）。"""
         if step <= 0:

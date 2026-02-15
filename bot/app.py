@@ -98,6 +98,7 @@ class DecisionResult:
     entry_price: float = 0.0
     stop_loss: float = 0.0
     take_profit: float = 0.0
+    reasoning: str = ""
 
 
 # ════════════════════════════════════════════════════════════
@@ -210,6 +211,7 @@ def make_llm_decision(
             entry_price=decision.entry_price,
             stop_loss=decision.stop_loss,
             take_profit=decision.take_profit,
+            reasoning=decision.reasoning[:200],
         )
     except Exception as e:
         logger.warning("%sLLM 決策失敗 → HOLD: %s", _L2, e)
@@ -394,6 +396,10 @@ class TradingBot:
         )
         self._llm_semaphore = threading.Semaphore(3)  # LLM 並行上限
 
+        # ── 每日復盤 ──
+        from bot.review.reviewer import DailyReviewer
+        self._reviewer = DailyReviewer(db=self._db, llm_client=self._llm_client)
+
     def _restore_positions(self) -> None:
         """從 Supabase positions 表恢復持倉到 RiskManager（重啟接續）。"""
         mode = self.settings.spot.mode.value
@@ -403,7 +409,13 @@ class TradingBot:
             qty = row.get("quantity", 0)
             entry = row.get("entry_price", 0)
             if symbol and qty > 0 and entry > 0:
-                self.risk_manager.add_position(symbol, qty, entry)
+                self.risk_manager.add_position(
+                    symbol, qty, entry,
+                    stop_loss_price=row.get("stop_loss") or 0.0,
+                    take_profit_price=row.get("take_profit") or 0.0,
+                    entry_horizon=row.get("entry_horizon", ""),
+                    entry_reasoning=row.get("entry_reasoning", ""),
+                )
         if rows:
             logger.info("已從 Supabase 恢復 %d 筆 %s 模式持倉", len(rows), mode)
 
@@ -451,6 +463,10 @@ class TradingBot:
             if symbol and qty > 0 and entry > 0:
                 self._futures_risk.add_position(
                     symbol, side, qty, entry, leverage,
+                    stop_loss_price=row.get("stop_loss") or 0.0,
+                    take_profit_price=row.get("take_profit") or 0.0,
+                    entry_horizon=row.get("entry_horizon", ""),
+                    entry_reasoning=row.get("entry_reasoning", ""),
                 )
         if rows:
             logger.info("已從 Supabase 恢復 %d 筆合約 %s 模式持倉", len(rows), mode)
@@ -653,6 +669,9 @@ class TradingBot:
             )
             self._db.flush_logs()
 
+            # ── 每日復盤（UTC+8 00:00~00:30 觸發）──
+            self._maybe_run_daily_review()
+
             if self._running:
                 logger.info(
                     "=============================================",
@@ -824,6 +843,25 @@ class TradingBot:
             )
         except Exception:
             logger.exception("%s[合約] %s 處理時發生錯誤", _L1, symbol)
+
+    def _maybe_run_daily_review(self) -> None:
+        """每日復盤：在 UTC+8 00:00~00:30 之間觸發一次。"""
+        now_utc8 = datetime.now(timezone(timedelta(hours=8)))
+        if now_utc8.hour != 0 or now_utc8.minute > 30:
+            return
+        if not self._reviewer.should_run():
+            return
+        try:
+            logger.info("開始每日復盤...")
+            mode = self.settings.spot.mode.value
+            result = self._reviewer.run(mode=mode)
+            if result:
+                logger.info(
+                    "每日復盤完成，整體評分: %.0f%%",
+                    result.get("scores", {}).get("overall", 0) * 100,
+                )
+        except Exception:
+            logger.exception("每日復盤失敗")
 
     def _shutdown(self, signum, frame) -> None:
         logger.info("收到中止訊號，正在關閉...")

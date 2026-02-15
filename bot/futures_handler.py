@@ -332,11 +332,16 @@ class FuturesHandler:
             tp_order_id = oco_info.get("tp_order_id")
             sl_order_id = oco_info.get("sl_order_id")
 
+        entry_horizon = decision.horizon
+        entry_reasoning = decision.reasoning
+
         self._risk.add_position(
             symbol, side, risk_output.quantity, fill_price, leverage,
             tp_order_id=tp_order_id, sl_order_id=sl_order_id,
             stop_loss_price=risk_output.stop_loss_price,
             take_profit_price=risk_output.take_profit_price,
+            entry_horizon=entry_horizon,
+            entry_reasoning=entry_reasoning,
         )
 
         _mode = fc.mode.value
@@ -357,6 +362,8 @@ class FuturesHandler:
             "take_profit": risk_output.take_profit_price,
             "liquidation_price": risk_output.liquidation_price,
             "margin_type": fc.margin_type,
+            "entry_horizon": entry_horizon,
+            "entry_reasoning": entry_reasoning,
         }, mode=_mode, market_type="futures")
 
         logger.info(
@@ -485,6 +492,8 @@ class FuturesHandler:
                 current_price=price_now,
                 unrealized_pnl=pnl,
                 unrealized_pnl_pct=pnl_pct,
+                entry_horizon=pos_data.get("entry_horizon", ""),
+                entry_reasoning=pos_data.get("entry_reasoning", ""),
             ))
 
         fc = self._settings.futures

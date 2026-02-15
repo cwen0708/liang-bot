@@ -3,7 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useBotStore } from '@/stores/bot'
 import { useSupabase } from '@/composables/useSupabase'
 import { useRealtimeTable } from '@/composables/useRealtime'
-import type { FuturesMargin, Order, LLMDecision } from '@/types'
+import type { Order, LLMDecision } from '@/types'
 
 const bot = useBotStore()
 const supabase = useSupabase()
@@ -12,38 +12,8 @@ const filteredFuturesPositions = computed(() =>
   bot.futuresPositions.filter(p => (p.mode ?? 'live') === bot.globalMode),
 )
 
-const marginHistory = ref<FuturesMargin[]>([])
-
-onMounted(async () => {
+onMounted(() => {
   bot.fetchFuturesMargin()
-  bot.fetchFuturesFunding()
-
-  const { data } = await supabase
-    .from('futures_margin')
-    .select('*')
-    .eq('mode', bot.globalMode)
-    .order('created_at', { ascending: false })
-    .limit(100)
-  if (data) marginHistory.value = (data as FuturesMargin[]).reverse()
-})
-
-const marginRatioPct = computed(() => {
-  if (!bot.futuresMargin) return 0
-  return bot.futuresMargin.margin_ratio * 100
-})
-
-const marginRatioColor = computed(() => {
-  const r = marginRatioPct.value
-  if (r >= 80) return 'text-(--color-danger)'
-  if (r >= 50) return 'text-amber-500'
-  return 'text-(--color-success)'
-})
-
-const marginRatioBg = computed(() => {
-  const r = marginRatioPct.value
-  if (r >= 80) return 'bg-(--color-danger)'
-  if (r >= 50) return 'bg-amber-500'
-  return 'bg-(--color-success)'
 })
 
 // ─── Orders ──────────────────────────────────────────────
@@ -102,7 +72,7 @@ const filteredOrders = computed(() => {
 
 // ─── Trade pairs: FIFO by symbol + position_side ─────────
 const tradePairs = computed<FuturesTradePair[]>(() => {
-  const all = futuresOrders.value.filter(o => o.status === 'filled' || o.status === 'closed' || o.status === 'new')
+  const all = futuresOrders.value.filter(o => o.status === 'filled' || o.status === 'closed')
 
   // Group by symbol + position_side
   const groups = new Map<string, Order[]>()
@@ -191,10 +161,12 @@ const filteredPairs = computed(() => {
 const pairStats = computed(() => {
   const closed = filteredPairs.value.filter(p => p.status === 'closed')
   const open = filteredPairs.value.filter(p => p.status === 'open')
-  const totalPnl = closed.reduce((sum, p) => sum + p.pnl, 0)
+  const realizedPnl = closed.reduce((sum, p) => sum + p.pnl, 0)
+  const unrealizedPnl = open.reduce((sum, p) => sum + p.pnl, 0)
+  const totalPnl = realizedPnl + unrealizedPnl
   const wins = closed.filter(p => p.pnl > 0).length
   const winRate = closed.length > 0 ? (wins / closed.length) * 100 : 0
-  return { closedCount: closed.length, openCount: open.length, totalPnl, winRate }
+  return { closedCount: closed.length, openCount: open.length, realizedPnl, unrealizedPnl, totalPnl, winRate }
 })
 
 // ─── Symbol groups ───────────────────────────────────────
@@ -328,10 +300,132 @@ function pnlSign(val: number): string {
   return val >= 0 ? '+' : ''
 }
 
+// ─── Mini price range chart ─────────────────────────────
+interface PricePoint { x: number; color: string; label: string; price: number }
+interface PriceRangeResult { points: PricePoint[]; rangeX: number; rangeW: number }
+
+function priceRangePoints(pos: { symbol: string; entry_price: number; current_price: number; stop_loss: number | null; take_profit: number | null; side?: string }, width: number): PriceRangeResult | null {
+  const entry = pos.entry_price
+  const live = livePrice(pos.symbol, pos.current_price)
+  const sl = pos.stop_loss ?? 0
+  const tp = pos.take_profit ?? 0
+
+  if (!entry || !live) return null
+
+  const corePrices: number[] = [entry, live]
+  if (sl > 0) corePrices.push(sl)
+  if (tp > 0) corePrices.push(tp)
+
+  const min = Math.min(...corePrices)
+  const max = Math.max(...corePrices)
+  if (max <= min) return null
+
+  const range = max - min
+  const padMin = min - range * 0.15
+  const padMax = max + range * 0.15
+  const padRange = padMax - padMin
+
+  const toX = (p: number) => Math.max(4, Math.min(width - 4, ((p - padMin) / padRange) * width))
+
+  const points: PricePoint[] = []
+  if (sl > 0) points.push({ x: toX(sl), color: 'var(--color-danger)', label: 'SL', price: sl })
+  points.push({ x: toX(entry), color: 'var(--color-text-muted)', label: 'Entry', price: entry })
+  points.push({ x: toX(live), color: 'var(--color-accent)', label: 'Live', price: live })
+  if (tp > 0) points.push({ x: toX(tp), color: 'var(--color-success)', label: 'TP', price: tp })
+
+  points.sort((a, b) => a.x - b.x)
+
+  // Range bar between SL and TP
+  const slPt = points.find(p => p.label === 'SL')
+  const tpPt = points.find(p => p.label === 'TP')
+  let rangeX = 0, rangeW = 0
+  if (slPt && tpPt) {
+    rangeX = Math.min(slPt.x, tpPt.x)
+    rangeW = Math.abs(tpPt.x - slPt.x)
+  }
+
+  return { points, rangeX, rangeW }
+}
+
 function actionLabel(action: string): string {
   if (action === 'BUY' || action === 'COVER') return '買入'
   if (action === 'SELL' || action === 'SHORT') return '賣出'
   return '觀望'
+}
+
+// ─── Export / Copy ───────────────────────────────────────
+const copySuccess = ref(false)
+
+function exportPageText(): string {
+  const lines: string[] = []
+  const m = bot.futuresMargin
+  if (m) {
+    lines.push(`錢包餘額: ${m.total_wallet_balance.toFixed(2)} USDT`)
+    lines.push(`可用餘額: ${m.available_balance.toFixed(2)} USDT`)
+    lines.push(`未實現損益: ${m.total_unrealized_pnl >= 0 ? '+' : ''}${m.total_unrealized_pnl.toFixed(2)} USDT`)
+    lines.push('')
+  }
+
+  // Positions
+  const positions = filteredFuturesPositions.value
+  if (positions.length) {
+    lines.push(`持倉 (${positions.length})`)
+    for (const pos of positions) {
+      const { pnl, pnlPct } = calcPnl(pos)
+      const price = livePrice(pos.symbol, pos.current_price)
+      const notional = (pos.quantity * price).toFixed(2)
+      lines.push(`  ${pos.symbol} ${pos.side?.toUpperCase()} ${pos.leverage ?? 1}x | 數量 ${pos.quantity.toFixed(4)} | 倉位 $${notional} | 入場 $${pos.entry_price.toFixed(2)} | 現價 $${price.toFixed(2)} | PnL ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)${pos.stop_loss ? ` | SL $${pos.stop_loss.toFixed(2)}` : ''}${pos.take_profit ? ` | TP $${pos.take_profit.toFixed(2)}` : ''}`)
+    }
+    lines.push('')
+  }
+
+  // Trade pairs
+  const stats = pairStats.value
+  lines.push('交易紀錄')
+  lines.push(`已結 ${stats.closedCount} 筆 | 勝率 ${stats.winRate.toFixed(0)}% | 已實現 ${stats.realizedPnl >= 0 ? '+' : ''}${stats.realizedPnl.toFixed(2)} | 未實現 ${stats.unrealizedPnl >= 0 ? '+' : ''}${stats.unrealizedPnl.toFixed(2)} | 總損益 ${stats.totalPnl >= 0 ? '+' : ''}${stats.totalPnl.toFixed(2)} USDT | 持倉中 ${stats.openCount}`)
+  lines.push('')
+
+  for (const group of symbolGroups.value) {
+    lines.push(`${group.symbol}`)
+    lines.push(`${group.pairs.length} 筆 | ${group.openCount} 持倉中 | ${group.totalPnl >= 0 ? '+' : ''}${group.totalPnl.toFixed(2)} USDT`)
+    lines.push('#\t方向\t狀態\t入場\t出場\t數量\t損益\t持倉時間')
+    for (let i = 0; i < group.pairs.length; i++) {
+      const pair = group.pairs[i]!
+      const num = group.pairs.length - i
+      const dir = `${pair.positionSide === 'long' ? 'LONG' : 'SHORT'} ${pair.leverage}x`
+      const status = pair.status === 'closed' ? '已結' : '持倉中'
+      const entry = `$${pair.entryPrice.toFixed(2)} ${formatTime(pair.openOrder.created_at)}`
+      const exit = pair.closeOrder
+        ? `$${pair.exitPrice!.toFixed(2)} ${formatTime(pair.closeOrder.created_at)}`
+        : `$${livePrice(pair.symbol, pair.entryPrice).toFixed(2)} 至今`
+      const qty = pair.quantity.toFixed(4)
+      const pnl = `${pair.pnl >= 0 ? '+' : ''}${pair.pnl.toFixed(2)} (${pair.pnlPct >= 0 ? '+' : ''}${pair.pnlPct.toFixed(2)}%)`
+      const dur = formatDuration(pair.holdDurationMs)
+      lines.push(`${num}\t${dir}\t${status}\t${entry}\t${exit}\t${qty}\t${pnl}\t${dur}`)
+    }
+    lines.push('')
+  }
+
+  return lines.join('\n')
+}
+
+async function copyPageText() {
+  const text = exportPageText()
+  try {
+    await navigator.clipboard.writeText(text)
+    copySuccess.value = true
+    setTimeout(() => { copySuccess.value = false }, 2000)
+  } catch {
+    // fallback
+    const ta = document.createElement('textarea')
+    ta.value = text
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    copySuccess.value = true
+    setTimeout(() => { copySuccess.value = false }, 2000)
+  }
 }
 </script>
 
@@ -341,6 +435,15 @@ function actionLabel(action: string): string {
     <div class="flex items-center justify-between gap-2 shrink-0 flex-wrap">
       <h2 class="text-2xl md:text-3xl font-bold">合約</h2>
       <div class="flex items-center gap-2">
+        <button
+          class="p-1.5 rounded-lg transition-colors"
+          :class="copySuccess ? 'text-(--color-success) bg-(--color-success)/10' : 'text-(--color-text-secondary) hover:bg-(--color-bg-secondary)'"
+          title="複製頁面資訊"
+          @click="copyPageText"
+        >
+          <svg v-if="!copySuccess" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </button>
         <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
           <button
             class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
@@ -364,47 +467,50 @@ function actionLabel(action: string): string {
     <div class="flex flex-col gap-4 md:gap-5 min-h-0 md:flex-1 md:overflow-auto">
 
     <!-- Margin Account Summary -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
-        <div class="text-sm text-(--color-text-secondary)">錢包餘額</div>
-        <div class="text-xl md:text-2xl font-bold font-mono mt-1">
+    <div class="grid grid-cols-3 md:grid-cols-5 gap-2 md:gap-3">
+      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
+        <div class="text-xs text-(--color-text-secondary)">錢包餘額</div>
+        <div class="text-lg md:text-xl font-bold font-mono mt-0.5">
           {{ bot.futuresMargin ? bot.futuresMargin.total_wallet_balance.toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '--' }}
         </div>
-        <div class="text-xs text-(--color-text-secondary) mt-0.5">USDT</div>
       </div>
 
-      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
-        <div class="text-sm text-(--color-text-secondary)">可用餘額</div>
-        <div class="text-xl md:text-2xl font-bold font-mono mt-1">
+      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
+        <div class="text-xs text-(--color-text-secondary)">已實現損益</div>
+        <div class="text-lg md:text-xl font-bold font-mono mt-0.5" :class="pnlColor(pairStats.realizedPnl)">
+          {{ pnlSign(pairStats.realizedPnl) }}{{ pairStats.realizedPnl.toFixed(2) }}
+        </div>
+        <div class="text-[11px] text-(--color-text-muted) mt-0.5">勝率 {{ pairStats.winRate.toFixed(0) }}%</div>
+      </div>
+
+      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
+        <div class="text-xs text-(--color-text-secondary)">未實現損益</div>
+        <div class="text-lg md:text-xl font-bold font-mono mt-0.5"
+             :class="pnlColor(pairStats.unrealizedPnl)">
+          {{ pnlSign(pairStats.unrealizedPnl) }}{{ pairStats.unrealizedPnl.toFixed(2) }}
+        </div>
+        <div class="text-[11px] text-(--color-text-muted) mt-0.5">{{ pairStats.openCount }} 筆持倉中</div>
+      </div>
+
+      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
+        <div class="text-xs text-(--color-text-secondary)">總損益</div>
+        <div class="text-lg md:text-xl font-bold font-mono mt-0.5" :class="pnlColor(pairStats.totalPnl)">
+          {{ pnlSign(pairStats.totalPnl) }}{{ pairStats.totalPnl.toFixed(2) }}
+        </div>
+        <div class="text-[11px] text-(--color-text-muted) mt-0.5">USDT</div>
+      </div>
+
+      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
+        <div class="text-xs text-(--color-text-secondary)">可用餘額</div>
+        <div class="text-lg md:text-xl font-bold font-mono mt-0.5">
           {{ bot.futuresMargin ? bot.futuresMargin.available_balance.toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '--' }}
-        </div>
-        <div class="text-xs text-(--color-text-secondary) mt-0.5">USDT</div>
-      </div>
-
-      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
-        <div class="text-sm text-(--color-text-secondary)">未實現損益</div>
-        <div class="text-xl md:text-2xl font-bold font-mono mt-1"
-             :class="bot.futuresMargin && bot.futuresMargin.total_unrealized_pnl >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'">
-          {{ bot.futuresMargin ? (bot.futuresMargin.total_unrealized_pnl >= 0 ? '+' : '') + bot.futuresMargin.total_unrealized_pnl.toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '--' }}
-        </div>
-        <div class="text-xs text-(--color-text-secondary) mt-0.5">USDT</div>
-      </div>
-
-      <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
-        <div class="text-sm text-(--color-text-secondary)">保證金比率</div>
-        <div class="text-xl md:text-2xl font-bold font-mono mt-1" :class="marginRatioColor">
-          {{ bot.futuresMargin ? marginRatioPct.toFixed(1) + '%' : '--' }}
-        </div>
-        <div class="w-full bg-(--color-bg-secondary) rounded-full h-1.5 mt-2">
-          <div class="h-1.5 rounded-full transition-all duration-500" :class="marginRatioBg"
-               :style="{ width: Math.min(marginRatioPct, 100) + '%' }" />
         </div>
       </div>
     </div>
 
     <!-- Positions: horizontal scroll cards -->
     <section class="shrink-0">
-      <h3 class="text-lg font-semibold text-(--color-text-primary) mb-2">持倉</h3>
+      <h3 class="text-lg font-semibold text-(--color-text-primary) mb-2">持倉 <span class="text-sm font-normal text-(--color-text-muted)">{{ filteredFuturesPositions.length }}</span></h3>
       <div v-if="!filteredFuturesPositions.length" class="text-sm text-(--color-text-secondary) bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4">
         目前無合約持倉
       </div>
@@ -443,6 +549,10 @@ function actionLabel(action: string): string {
                 <span class="text-(--color-text-primary) font-medium">{{ pos.quantity.toFixed(4) }}</span>
               </div>
               <div class="flex justify-between">
+                <span>倉位</span>
+                <span class="text-(--color-text-primary) font-medium">${{ (pos.quantity * livePrice(pos.symbol, pos.current_price)).toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
+              </div>
+              <div class="flex justify-between">
                 <span>入場</span>
                 <span class="text-(--color-text-primary) font-medium">${{ pos.entry_price.toLocaleString('en', { minimumFractionDigits: 2 }) }}</span>
               </div>
@@ -458,10 +568,32 @@ function actionLabel(action: string): string {
                 <span>止盈</span>
                 <span class="text-(--color-success) font-medium">${{ pos.take_profit.toLocaleString('en', { minimumFractionDigits: 2 }) }}</span>
               </div>
-              <div v-if="pos.liquidation_price" class="flex justify-between">
-                <span>清算</span>
-                <span class="text-(--color-danger) font-medium">${{ pos.liquidation_price.toLocaleString('en', { minimumFractionDigits: 2 }) }}</span>
-              </div>
+            </div>
+            <!-- Mini price range chart -->
+            <div v-if="priceRangePoints(pos, 190)" class="mt-2 pt-2 border-t border-(--color-border)/30">
+              <svg width="190" height="24" class="w-full" viewBox="0 0 190 24">
+                <!-- Baseline -->
+                <line x1="0" y1="12" x2="190" y2="12" stroke="var(--color-border)" stroke-width="1" />
+                <!-- SL–TP range bar -->
+                <rect v-if="priceRangePoints(pos, 190)!.rangeW > 0"
+                  :x="priceRangePoints(pos, 190)!.rangeX" y="8" :width="priceRangePoints(pos, 190)!.rangeW"
+                  height="8" rx="3" fill="var(--color-text-muted)" opacity="0.1"
+                />
+                <!-- Price markers -->
+                <template v-for="pt in priceRangePoints(pos, 190)!.points" :key="pt.label">
+                  <!-- Live: larger filled dot with ring -->
+                  <template v-if="pt.label === 'Live'">
+                    <circle :cx="pt.x" cy="12" r="5" :fill="pt.color" opacity="0.15" />
+                    <circle :cx="pt.x" cy="12" r="3.5" :fill="pt.color" />
+                    <text :x="pt.x" y="22" text-anchor="middle" :fill="pt.color" font-size="7" font-weight="600">{{ pt.label }}</text>
+                  </template>
+                  <!-- SL/TP/Entry: small dots -->
+                  <template v-else>
+                    <circle :cx="pt.x" cy="12" r="2.5" :fill="pt.color" />
+                    <text :x="pt.x" y="22" text-anchor="middle" :fill="pt.color" font-size="7" font-weight="500">{{ pt.label }}</text>
+                  </template>
+                </template>
+              </svg>
             </div>
           </div>
         </div>
@@ -474,7 +606,7 @@ function actionLabel(action: string): string {
       <template v-if="viewMode === 'pairs'">
         <div class="flex items-center justify-between mb-2 shrink-0">
           <h3 class="text-lg font-semibold text-(--color-text-primary)">
-            交易紀錄
+            交易紀錄 <span class="text-sm font-normal text-(--color-text-muted)">{{ filteredPairs.length }}</span>
             <span v-if="filterSymbol" class="text-sm font-normal text-(--color-accent) ml-2">{{ filterSymbol }}</span>
           </h3>
           <button
@@ -484,15 +616,6 @@ function actionLabel(action: string): string {
           >清除篩選</button>
         </div>
 
-        <!-- Stats bar -->
-        <div v-if="filteredPairs.length" class="flex items-center gap-4 text-sm mb-3 flex-wrap">
-          <span class="text-(--color-text-secondary)">已結 <span class="font-medium text-(--color-text-primary)">{{ pairStats.closedCount }}</span> 筆</span>
-          <span v-if="pairStats.closedCount" class="text-(--color-text-secondary)">勝率 <span class="font-medium text-(--color-text-primary)">{{ pairStats.winRate.toFixed(0) }}%</span></span>
-          <span v-if="pairStats.closedCount" :class="pnlColor(pairStats.totalPnl)">
-            總損益 <span class="font-bold">{{ pnlSign(pairStats.totalPnl) }}{{ pairStats.totalPnl.toFixed(2) }} USDT</span>
-          </span>
-          <span v-if="pairStats.openCount" class="text-(--color-accent)">持倉中 {{ pairStats.openCount }}</span>
-        </div>
 
         <div class="flex flex-col gap-3">
           <div v-if="ordersLoading" class="text-base text-(--color-text-secondary) bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4">載入中...</div>
@@ -815,71 +938,6 @@ function actionLabel(action: string): string {
       </template>
     </div>
 
-    <!-- Funding Rate -->
-    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl shadow-sm dark:shadow-none">
-      <div class="p-4 border-b border-(--color-border)">
-        <h3 class="font-semibold text-lg">資金費率紀錄</h3>
-      </div>
-
-      <div v-if="bot.futuresFunding.length === 0" class="p-8 text-center text-(--color-text-secondary)">
-        尚無資金費率紀錄
-      </div>
-
-      <div v-else class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="text-(--color-text-secondary) border-b border-(--color-border)">
-              <th class="text-left p-3">時間</th>
-              <th class="text-left p-3">幣對</th>
-              <th class="text-right p-3">費率</th>
-              <th class="text-right p-3">費用</th>
-              <th class="text-right p-3">持倉量</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="f in bot.futuresFunding" :key="f.id"
-                class="border-b border-(--color-border) last:border-0">
-              <td class="p-3 text-(--color-text-secondary)">{{ formatTime(f.created_at) }}</td>
-              <td class="p-3 font-medium">{{ f.symbol }}</td>
-              <td class="p-3 text-right font-mono"
-                  :class="f.funding_rate >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'">
-                {{ (f.funding_rate * 100).toFixed(4) }}%
-              </td>
-              <td class="p-3 text-right font-mono"
-                  :class="f.funding_fee >= 0 ? 'text-(--color-success)' : 'text-(--color-danger)'">
-                {{ (f.funding_fee >= 0 ? '+' : '') + f.funding_fee.toFixed(4) }}
-              </td>
-              <td class="p-3 text-right font-mono">{{ f.position_size.toFixed(4) }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Margin Ratio History -->
-    <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl shadow-sm dark:shadow-none">
-      <div class="p-4 border-b border-(--color-border)">
-        <h3 class="font-semibold text-lg">保證金比率歷史</h3>
-      </div>
-
-      <div v-if="marginHistory.length === 0" class="p-8 text-center text-(--color-text-secondary)">
-        尚無歷史數據
-      </div>
-
-      <div v-else class="p-4 overflow-x-auto">
-        <div class="flex items-end gap-1 h-32 min-w-[400px]">
-          <div v-for="(m, i) in marginHistory" :key="i"
-               class="flex-1 min-w-[3px] rounded-t transition-all"
-               :class="m.margin_ratio >= 0.8 ? 'bg-(--color-danger)' : m.margin_ratio >= 0.5 ? 'bg-amber-500' : 'bg-(--color-success)'"
-               :style="{ height: Math.max(m.margin_ratio * 100, 2) + '%' }"
-               :title="`${formatTime(m.created_at)}: ${(m.margin_ratio * 100).toFixed(1)}%`" />
-        </div>
-        <div class="flex justify-between text-xs text-(--color-text-secondary) mt-1">
-          <span v-if="marginHistory.length">{{ formatTime(marginHistory[0]!.created_at) }}</span>
-          <span v-if="marginHistory.length > 1">{{ formatTime(marginHistory[marginHistory.length - 1]!.created_at) }}</span>
-        </div>
-      </div>
-    </div>
     </div><!-- /scrollable content -->
   </div>
 </template>

@@ -77,10 +77,11 @@ class SMACrossoverStrategy(BaseStrategy):
         sma_fast = latest["sma_fast"] if not pd.isna(latest["sma_fast"]) else 0
         sma_slow = latest["sma_slow"] if not pd.isna(latest["sma_slow"]) else 0
 
-        # 信心度：兩線距離越大，信心越高
+        # 信心度：兩線距離越大，趨勢越明確，信心越高
         spread = abs(sma_fast - sma_slow) / sma_slow if sma_slow > 0 else 0
         if signal != Signal.HOLD:
-            confidence = min(1.0, max(0.3, spread * 50))
+            # spread 典型值 0.001~0.02，放大到 0.5~1.0 範圍
+            confidence = min(1.0, max(0.5, 0.5 + spread * 25))  # 範圍 0.5~1.0
         else:
             confidence = 0.0
 

@@ -79,7 +79,7 @@ class OrderFlowConfig:
     divergence_peak_order: int = 5
     sfp_swing_lookback: int = 5
     absorption_lookback: int = 10
-    signal_threshold: float = 0.5
+    signal_threshold: float = 0.35
 
 
 @dataclass(frozen=True)

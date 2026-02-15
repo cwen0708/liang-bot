@@ -81,11 +81,15 @@ class RSIOversoldStrategy(BaseStrategy):
         oversold = self.params.get("oversold", 30)
         overbought = self.params.get("overbought", 70)
 
-        # 信心度：RSI 越極端，信心越高
+        # 信心度：前一根 RSI 越深入超買/超賣區，反轉信心越高
+        prev_rsi = df_calc.iloc[-2]["rsi"] if not pd.isna(df_calc.iloc[-2]["rsi"]) else 50.0
         if signal == Signal.BUY:
-            confidence = min(1.0, (oversold - rsi_val + 10) / oversold)
+            # prev_rsi 越低於 oversold，代表超賣越深，反轉信心越高
+            depth = max(0, oversold - prev_rsi) / oversold  # 0~1
+            confidence = min(1.0, 0.5 + depth * 0.5)  # 範圍 0.5~1.0
         elif signal == Signal.SELL:
-            confidence = min(1.0, (rsi_val - overbought + 10) / (100 - overbought))
+            depth = max(0, prev_rsi - overbought) / (100 - overbought)  # 0~1
+            confidence = min(1.0, 0.5 + depth * 0.5)
         else:
             confidence = 0.0
 

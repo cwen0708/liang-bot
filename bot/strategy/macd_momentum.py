@@ -79,9 +79,12 @@ class MACDMomentumStrategy(BaseStrategy):
         signal_val = latest["macd_signal"] if not pd.isna(latest["macd_signal"]) else 0
         hist_val = latest["macd_hist"] if not pd.isna(latest["macd_hist"]) else 0
 
-        # 信心度：柱狀圖（histogram）的絕對值越大，動量越強
+        # 信心度：用 histogram 相對於價格的比例衡量動量強度
         if signal != Signal.HOLD:
-            confidence = min(1.0, max(0.3, abs(hist_val) / max(abs(macd_val), 1e-10)))
+            price = latest["close"] if "close" in latest and latest["close"] > 0 else 1.0
+            # histogram 占價格的比例，乘以放大因子使信心度分佈更廣
+            hist_ratio = abs(hist_val) / price * 1000  # 典型值 0.01~2.0
+            confidence = min(1.0, max(0.4, 0.4 + hist_ratio * 0.3))  # 範圍 0.4~1.0
         else:
             confidence = 0.0
 

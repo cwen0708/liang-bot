@@ -12,9 +12,7 @@ const { rows: orders, loading } = useRealtimeTable<Order>('orders', { limit: 200
 
 const filterMode = computed(() => bot.globalMode)
 const filterSymbol = ref('')
-const filterStatus = ref('')
-const viewMode = ref<'pairs' | 'flat'>('pairs')
-const expandedOrderId = ref<number | null>(null)
+const viewMode = ref<'all' | 'open' | 'strategy'>('all')
 const expandedPairId = ref<string | null>(null)
 const collapsedSymbols = ref(new Set<string>())
 
@@ -63,20 +61,6 @@ const spotOrders = computed(() => {
   )
 })
 
-// ─── Flat view: filtered orders ────────────────────────────
-const filteredOrders = computed(() => {
-  let result = [...spotOrders.value]
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-  if (filterSymbol.value) {
-    result = result.filter(o => o.symbol === filterSymbol.value)
-  }
-  if (filterStatus.value === 'filled') {
-    result = result.filter(o => o.status === 'filled' || o.status === 'closed')
-  } else if (filterStatus.value === 'cancelled') {
-    result = result.filter(o => o.status === 'cancelled')
-  }
-  return result
-})
 
 // ─── Trade pairs: FIFO quantity matching ───────────────────
 const tradePairs = computed<TradePair[]>(() => {
@@ -213,6 +197,17 @@ const symbolGroups = computed<SymbolGroup[]>(() => {
   })
 })
 
+const displayGroups = computed(() => {
+  if (viewMode.value === 'strategy') return symbolGroups.value.filter(g => sdHasDecisions(g.symbol))
+  if (viewMode.value === 'open') return symbolGroups.value.filter(g => g.openCount > 0)
+  return symbolGroups.value
+})
+
+function getDisplayPairs(group: SymbolGroup): TradePair[] {
+  if (viewMode.value === 'open') return group.pairs.filter(p => p.status === 'open')
+  return group.pairs
+}
+
 function toggleSymbolGroup(symbol: string) {
   const s = new Set(collapsedSymbols.value)
   if (s.has(symbol)) s.delete(symbol)
@@ -251,28 +246,7 @@ async function loadPairDecisions(pair: TradePair) {
   pairDecisions.value.set(pair.id, { entry, exit })
 }
 
-// Flat view decisions (lazy loaded on expand)
-const orderDecisions = ref(new Map<number, LLMDecision | null>())
-
-async function loadOrderDecision(order: Order) {
-  if (orderDecisions.value.has(order.id)) return
-  if (!order.cycle_id) {
-    orderDecisions.value.set(order.id, null)
-    return
-  }
-  const decision = await fetchDecision(order.cycle_id, order.symbol)
-  orderDecisions.value.set(order.id, decision)
-}
-
 // ─── UI helpers ────────────────────────────────────────────
-function toggleExpand(orderId: number, order: Order) {
-  if (expandedOrderId.value === orderId) {
-    expandedOrderId.value = null
-  } else {
-    expandedOrderId.value = orderId
-    loadOrderDecision(order)
-  }
-}
 
 function togglePairExpand(pair: TradePair) {
   if (expandedPairId.value === pair.id) {
@@ -287,22 +261,6 @@ function selectPosition(symbol: string) {
   filterSymbol.value = filterSymbol.value === symbol ? '' : symbol
 }
 
-function statusLabel(status: string): string {
-  if (status === 'filled' || status === 'closed') return '已成交'
-  if (status === 'partial') return '部分成交'
-  if (status === 'cancelled') return '已取消'
-  return status
-}
-
-function actionLabel(action: string): string {
-  if (action === 'BUY') return '買入'
-  if (action === 'SELL') return '賣出'
-  return '觀望'
-}
-
-function formatDate(ts: string) {
-  return new Date(ts).toLocaleString('zh-TW', { hour12: false })
-}
 
 function formatDateShort(ts: string) {
   return new Date(ts).toLocaleString('zh-TW', {
@@ -554,15 +512,13 @@ const sdDrawerDecision = ref<LLMDecision | null>(null)
 </script>
 
 <template>
-  <div class="p-4 md:p-6 flex flex-col md:h-[calc(100vh)] md:overflow-hidden">
-    <!-- Scrollable content -->
-    <div class="flex flex-col gap-4 md:gap-5 min-h-0 md:flex-1 md:overflow-auto">
+  <div class="p-4 md:p-6 space-y-4 md:space-y-6">
 
     <!-- Header -->
-    <h2 class="text-2xl md:text-3xl font-bold shrink-0">現貨</h2>
+    <h2 class="text-2xl font-bold md:hidden">現貨</h2>
 
     <!-- Toolbar -->
-    <div class="flex items-center justify-end gap-2 shrink-0 flex-wrap">
+    <div class="flex items-center justify-end gap-2 flex-wrap">
       <!-- Copy button -->
       <button
         class="p-1.5 rounded-lg transition-colors"
@@ -576,43 +532,14 @@ const sdDrawerDecision = ref<LLMDecision | null>(null)
       <!-- View mode toggle -->
       <div class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
         <button
+          v-for="opt in ([['all', '全部'], ['open', '持倉'], ['strategy', '策略']] as const)"
+          :key="opt[0]"
           class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-          :class="viewMode === 'pairs'
+          :class="viewMode === opt[0]
             ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
             : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-          @click="viewMode = 'pairs'"
-        >交易配對</button>
-        <button
-          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-          :class="viewMode === 'flat'
-            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-          @click="viewMode = 'flat'"
-        >原始訂單</button>
-      </div>
-      <!-- Status filter (flat view only) -->
-      <div v-if="viewMode === 'flat'" class="inline-flex rounded-lg bg-(--color-bg-secondary) p-0.5">
-        <button
-          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-          :class="!filterStatus
-            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-          @click="filterStatus = ''"
-        >全部</button>
-        <button
-          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-          :class="filterStatus === 'filled'
-            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-          @click="filterStatus = 'filled'"
-        >已成交</button>
-        <button
-          class="px-3 py-1 rounded-md text-sm font-medium transition-colors"
-          :class="filterStatus === 'cancelled'
-            ? 'bg-(--color-bg-card) text-(--color-text-primary) shadow-sm'
-            : 'text-(--color-text-secondary) hover:text-(--color-text-primary)'"
-          @click="filterStatus = 'cancelled'"
-        >已取消</button>
+          @click="viewMode = opt[0]"
+        >{{ opt[1] }}</button>
       </div>
     </div>
 
@@ -659,15 +586,7 @@ const sdDrawerDecision = ref<LLMDecision | null>(null)
     </div>
 
       <!-- ===== Positions: horizontal scroll ===== -->
-      <section class="shrink-0">
-        <div class="flex items-center justify-between mb-2">
-          <h3 class="text-lg font-semibold text-(--color-text-primary)">持倉 <span class="text-sm font-normal text-(--color-text-muted)">{{ filteredPositions.length }}</span></h3>
-          <button
-            v-if="filterSymbol"
-            class="text-xs text-(--color-accent) hover:underline"
-            @click="filterSymbol = ''"
-          >清除篩選</button>
-        </div>
+      <section v-if="viewMode !== 'strategy'">
         <div v-if="!filteredPositions.length" class="text-sm text-(--color-text-secondary) bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4">
           目前無持倉
         </div>
@@ -744,22 +663,16 @@ const sdDrawerDecision = ref<LLMDecision | null>(null)
       </section>
 
       <!-- ===== PAIRS VIEW (grouped by symbol) ===== -->
-      <section v-if="viewMode === 'pairs'" class="flex flex-col min-h-0">
-        <div class="flex items-center justify-between mb-2 shrink-0">
-          <h3 class="text-lg font-semibold text-(--color-text-primary)">
-            交易紀錄 <span class="text-sm font-normal text-(--color-text-muted)">{{ filteredPairs.length }}</span>
-            <span v-if="filterSymbol" class="text-sm font-normal text-(--color-accent) ml-2">{{ filterSymbol }}</span>
-          </h3>
-        </div>
-
-
+      <section class="flex flex-col min-h-0">
         <div class="flex flex-col gap-3">
           <div v-if="loading" class="text-base text-(--color-text-secondary) bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4">載入中...</div>
-          <div v-else-if="!symbolGroups.length" class="text-base text-(--color-text-secondary) bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4">無交易紀錄</div>
+          <div v-else-if="!displayGroups.length" class="text-base text-(--color-text-secondary) bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4">
+            {{ viewMode === 'open' ? '目前無持倉中的交易' : '無交易紀錄' }}
+          </div>
 
           <!-- Symbol groups -->
           <div
-            v-for="group in symbolGroups"
+            v-for="group in displayGroups"
             :key="group.symbol"
             class="bg-(--color-bg-card) border border-(--color-border) rounded-xl shadow-sm dark:shadow-none overflow-hidden"
           >
@@ -776,8 +689,7 @@ const sdDrawerDecision = ref<LLMDecision | null>(null)
                   :class="collapsedSymbols.has(group.symbol) ? '' : 'rotate-90'"
                 ><polyline points="9 18 15 12 9 6"/></svg>
                 <span class="font-bold text-base text-(--color-text-primary)">{{ group.symbol }}</span>
-                <span class="text-sm text-(--color-text-secondary)">{{ group.pairs.length }} 筆交易</span>
-                <span v-if="group.openCount" class="px-1.5 py-0.5 rounded text-[11px] font-medium bg-(--color-accent)/20 text-(--color-accent)">{{ group.openCount }} 持倉中</span>
+                <span class="text-sm text-(--color-text-secondary)">{{ group.closedCount > 0 ? `${(group.winCount / group.closedCount * 100).toFixed(0)}% 勝率` : `${group.openCount} 持倉中` }}</span>
               </div>
               <span class="font-bold text-sm" :class="pnlColor(group.totalPnl)">{{ pnlSign(group.totalPnl) }}{{ group.totalPnl.toFixed(2) }} USDT</span>
             </div>
@@ -848,7 +760,7 @@ const sdDrawerDecision = ref<LLMDecision | null>(null)
               </div>
 
               <!-- Desktop table -->
-              <table class="w-full text-base hidden md:table">
+              <table v-if="viewMode !== 'strategy'" class="w-full text-base hidden md:table">
                 <thead>
                   <tr class="text-(--color-text-secondary) text-left text-xs">
                     <th class="px-4 py-1.5">#</th>
@@ -861,13 +773,13 @@ const sdDrawerDecision = ref<LLMDecision | null>(null)
                   </tr>
                 </thead>
                 <tbody>
-                  <template v-for="(pair, idx) in group.pairs" :key="pair.id">
+                  <template v-for="(pair, idx) in getDisplayPairs(group)" :key="pair.id">
                     <tr
                       class="border-t border-(--color-border)/50 cursor-pointer transition-colors"
                       :class="expandedPairId === pair.id ? 'bg-(--color-bg-secondary)/70' : 'hover:bg-(--color-bg-secondary)/50'"
                       @click="togglePairExpand(pair)"
                     >
-                      <td class="px-4 py-2 text-sm text-(--color-text-muted)">{{ group.pairs.length - idx }}</td>
+                      <td class="px-4 py-2 text-sm text-(--color-text-muted)">{{ getDisplayPairs(group).length - idx }}</td>
                       <td class="py-2">
                         <span
                           class="px-2 py-0.5 rounded text-xs"
@@ -933,16 +845,16 @@ const sdDrawerDecision = ref<LLMDecision | null>(null)
               </table>
 
               <!-- Mobile cards -->
-              <div class="md:hidden p-3 space-y-2">
+              <div v-if="viewMode !== 'strategy'" class="md:hidden p-3 space-y-2">
                 <div
-                  v-for="(pair, idx) in group.pairs"
+                  v-for="(pair, idx) in getDisplayPairs(group)"
                   :key="pair.id"
                   class="bg-(--color-bg-secondary) rounded-lg p-3"
                   @click="togglePairExpand(pair)"
                 >
                   <div class="flex justify-between items-center mb-2">
                     <div class="flex items-center gap-2">
-                      <span class="text-xs text-(--color-text-muted)">#{{ group.pairs.length - idx }}</span>
+                      <span class="text-xs text-(--color-text-muted)">#{{ getDisplayPairs(group).length - idx }}</span>
                       <span
                         class="px-1.5 py-0.5 rounded text-[11px] font-medium"
                         :class="pair.status === 'closed'
@@ -994,153 +906,6 @@ const sdDrawerDecision = ref<LLMDecision | null>(null)
           </div>
         </div>
       </section>
-
-      <!-- ===== FLAT VIEW (original orders) ===== -->
-      <section v-else class="flex flex-col min-h-0 md:flex-1">
-        <h3 class="text-lg font-semibold mb-2 text-(--color-text-primary)">
-          訂單紀錄
-          <span v-if="filterSymbol" class="text-sm font-normal text-(--color-accent) ml-2">{{ filterSymbol }}</span>
-        </h3>
-        <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 flex flex-col min-h-0 md:flex-1 shadow-sm dark:shadow-none">
-          <div v-if="loading" class="text-base text-(--color-text-secondary)">載入中...</div>
-          <div v-else-if="!filteredOrders.length" class="text-base text-(--color-text-secondary)">無訂單紀錄</div>
-
-          <!-- Desktop table -->
-          <div v-if="!loading && filteredOrders.length" class="hidden md:block overflow-auto flex-1 min-h-0 table-responsive">
-            <table class="w-full text-base">
-              <thead>
-                <tr class="text-(--color-text-secondary) text-left text-sm">
-                  <th class="pb-2">狀態</th>
-                  <th class="pb-2">交易對</th>
-                  <th class="pb-2">方向</th>
-                  <th class="pb-2">數量</th>
-                  <th class="pb-2">價格</th>
-                  <th class="pb-2">成交量</th>
-                  <th class="pb-2">AI</th>
-                  <th class="pb-2">時間</th>
-                </tr>
-              </thead>
-              <tbody>
-                <template v-for="order in filteredOrders" :key="order.id">
-                  <tr
-                    class="border-t border-(--color-border) cursor-pointer transition-colors"
-                    :class="expandedOrderId === order.id ? 'bg-(--color-bg-secondary)/70' : 'hover:bg-(--color-bg-secondary)/50'"
-                    @click="toggleExpand(order.id, order)"
-                  >
-                    <td class="py-2">
-                      <span class="px-2 py-0.5 rounded text-xs" :class="{
-                        'bg-(--color-success)/20 text-(--color-success)': order.status === 'filled' || order.status === 'closed',
-                        'bg-(--color-warning)/20 text-(--color-warning)': order.status === 'partial',
-                        'bg-(--color-text-secondary)/20 text-(--color-text-secondary)': order.status === 'cancelled',
-                      }">{{ statusLabel(order.status) }}</span>
-                    </td>
-                    <td class="py-2 font-medium">{{ order.symbol }}</td>
-                    <td class="py-2">
-                      <span
-                        :class="order.side === 'buy' ? 'text-(--color-success)' : 'text-(--color-danger)'"
-                        class="font-medium"
-                      >{{ order.side === 'buy' ? '買入' : '賣出' }}</span>
-                    </td>
-                    <td class="py-2">{{ order.quantity.toFixed(6) }}</td>
-                    <td class="py-2">${{ order.price?.toFixed(2) ?? '-' }}</td>
-                    <td class="py-2 text-(--color-text-secondary)">{{ order.filled?.toFixed(6) ?? '-' }}</td>
-                    <td class="py-2">
-                      <span v-if="orderDecisions.has(order.id) && orderDecisions.get(order.id)" class="px-2 py-0.5 rounded text-xs font-medium" :class="{
-                        'bg-(--color-success)/20 text-(--color-success)': orderDecisions.get(order.id)!.action === 'BUY',
-                        'bg-(--color-danger)/20 text-(--color-danger)': orderDecisions.get(order.id)!.action === 'SELL',
-                        'bg-(--color-text-secondary)/20 text-(--color-text-secondary)': orderDecisions.get(order.id)!.action === 'HOLD',
-                      }">{{ actionLabel(orderDecisions.get(order.id)!.action) }} {{ (orderDecisions.get(order.id)!.confidence * 100).toFixed(0) }}%</span>
-                      <span v-else class="text-xs text-(--color-text-secondary)">-</span>
-                    </td>
-                    <td class="py-2 text-(--color-text-secondary) text-sm">{{ formatDate(order.created_at) }}</td>
-                  </tr>
-                  <tr v-if="expandedOrderId === order.id && !orderDecisions.has(order.id)">
-                    <td colspan="8" class="pb-3 pt-0 px-2">
-                      <div class="bg-(--color-bg-secondary) rounded-lg p-3 text-sm text-(--color-text-secondary)">載入 AI 決策...</div>
-                    </td>
-                  </tr>
-                  <tr v-else-if="expandedOrderId === order.id && orderDecisions.get(order.id)">
-                    <td colspan="8" class="pb-3 pt-0 px-2">
-                      <div class="bg-(--color-bg-secondary) rounded-lg p-3 text-sm">
-                        <div class="flex items-center gap-2 mb-1.5">
-                          <span class="font-medium text-(--color-text-primary)">AI 決策</span>
-                          <span class="px-2 py-0.5 rounded text-xs font-medium" :class="{
-                            'bg-(--color-success)/20 text-(--color-success)': orderDecisions.get(order.id)!.action === 'BUY',
-                            'bg-(--color-danger)/20 text-(--color-danger)': orderDecisions.get(order.id)!.action === 'SELL',
-                            'bg-(--color-text-secondary)/20 text-(--color-text-secondary)': orderDecisions.get(order.id)!.action === 'HOLD',
-                          }">{{ actionLabel(orderDecisions.get(order.id)!.action) }}</span>
-                          <span class="text-(--color-text-secondary)">信心 {{ (orderDecisions.get(order.id)!.confidence * 100).toFixed(0) }}%</span>
-                          <span class="text-(--color-text-secondary) ml-auto text-xs">{{ orderDecisions.get(order.id)!.model }}</span>
-                        </div>
-                        <p class="text-(--color-text-primary) leading-relaxed whitespace-pre-wrap">{{ orderDecisions.get(order.id)!.reasoning }}</p>
-                        <div class="mt-1.5 text-xs text-(--color-text-secondary)">cycle: {{ order.cycle_id }}</div>
-                      </div>
-                    </td>
-                  </tr>
-                  <tr v-else-if="expandedOrderId === order.id && !orderDecisions.get(order.id)">
-                    <td colspan="8" class="pb-3 pt-0 px-2">
-                      <div class="bg-(--color-bg-secondary) rounded-lg p-3 text-sm text-(--color-text-secondary)">
-                        {{ order.cycle_id ? '找不到對應的 AI 決策記錄' : '此訂單無 cycle_id（停損/停利觸發）' }}
-                      </div>
-                    </td>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-
-          <!-- Mobile cards -->
-          <div v-if="!loading && filteredOrders.length" class="md:hidden space-y-3 overflow-auto flex-1 min-h-0">
-            <div
-              v-for="order in filteredOrders"
-              :key="order.id"
-              class="bg-(--color-bg-secondary) rounded-lg p-3"
-              @click="toggleExpand(order.id, order)"
-            >
-              <div class="flex justify-between items-center mb-2">
-                <div class="flex items-center gap-2">
-                  <span
-                    :class="order.side === 'buy' ? 'text-(--color-success)' : 'text-(--color-danger)'"
-                    class="font-bold text-base"
-                  >{{ order.side === 'buy' ? '買入' : '賣出' }}</span>
-                  <span class="font-medium text-base">{{ order.symbol }}</span>
-                </div>
-                <div class="flex items-center gap-1.5">
-                  <span v-if="orderDecisions.has(order.id) && orderDecisions.get(order.id)" class="px-1.5 py-0.5 rounded text-xs font-medium" :class="{
-                    'bg-(--color-success)/20 text-(--color-success)': orderDecisions.get(order.id)!.action === 'BUY',
-                    'bg-(--color-danger)/20 text-(--color-danger)': orderDecisions.get(order.id)!.action === 'SELL',
-                  }">AI {{ (orderDecisions.get(order.id)!.confidence * 100).toFixed(0) }}%</span>
-                  <span class="px-2 py-0.5 rounded text-xs" :class="{
-                    'bg-(--color-success)/20 text-(--color-success)': order.status === 'filled' || order.status === 'closed',
-                    'bg-(--color-warning)/20 text-(--color-warning)': order.status === 'partial',
-                    'bg-(--color-text-secondary)/20 text-(--color-text-secondary)': order.status === 'cancelled',
-                  }">{{ statusLabel(order.status) }}</span>
-                </div>
-              </div>
-              <div class="grid grid-cols-2 gap-1 text-sm text-(--color-text-secondary)">
-                <div>數量: {{ order.quantity.toFixed(6) }}</div>
-                <div>價格: ${{ order.price?.toFixed(2) ?? '-' }}</div>
-                <div>成交: {{ order.filled?.toFixed(6) ?? '-' }}</div>
-                <div>{{ formatDateShort(order.created_at) }}</div>
-              </div>
-              <div v-if="expandedOrderId === order.id && !orderDecisions.has(order.id)" class="mt-2 pt-2 border-t border-(--color-border)/50 text-xs text-(--color-text-secondary)">
-                載入 AI 決策...
-              </div>
-              <div v-else-if="expandedOrderId === order.id && orderDecisions.get(order.id)" class="mt-2 pt-2 border-t border-(--color-border)/50">
-                <div class="flex items-center gap-2 mb-1">
-                  <span class="text-xs font-medium text-(--color-text-primary)">AI 決策</span>
-                  <span class="text-xs text-(--color-text-secondary)">信心 {{ (orderDecisions.get(order.id)!.confidence * 100).toFixed(0) }}%</span>
-                </div>
-                <p class="text-sm text-(--color-text-primary) leading-relaxed whitespace-pre-wrap">{{ orderDecisions.get(order.id)!.reasoning }}</p>
-              </div>
-              <div v-else-if="expandedOrderId === order.id && !orderDecisions.get(order.id)" class="mt-2 pt-2 border-t border-(--color-border)/50 text-xs text-(--color-text-secondary)">
-                {{ order.cycle_id ? '找不到對應的 AI 決策記錄' : '此訂單無 cycle_id' }}
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
 
     <DecisionDrawer :decision="sdDrawerDecision" @close="sdDrawerDecision = null" />
   </div>

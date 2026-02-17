@@ -586,7 +586,7 @@ onMounted(async () => {
   <div class="p-4 md:p-6 flex flex-col gap-4 md:gap-6 md:h-[calc(100vh)] md:overflow-hidden">
     <!-- Header bar -->
     <div class="flex flex-col sm:flex-row sm:items-center gap-3 shrink-0">
-      <h2 class="text-2xl md:text-3xl font-bold shrink-0">設定</h2>
+      <h2 class="text-2xl font-bold md:hidden">設定</h2>
 
       <!-- Version dropdown -->
       <select

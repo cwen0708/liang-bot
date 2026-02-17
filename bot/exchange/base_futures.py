@@ -90,3 +90,7 @@ class BaseFuturesExchange(ABC):
     @abstractmethod
     def get_min_order_amount(self, symbol: str) -> float:
         """取得最小下單數量。"""
+
+    def get_min_notional(self, symbol: str) -> float:
+        """取得最小名義金額（notional = qty × price）。"""
+        return 0.0

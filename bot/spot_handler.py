@@ -309,8 +309,17 @@ class SpotHandler:
                 logger.info("%s[現貨] 風控拒絕: %s", _L2, risk_output.reason)
                 return
             if decision_result.llm_override and risk_output.quantity > 0:
-                risk_output.quantity /= 2
-                logger.info("%s[現貨][覆蓋] 倉位縮半: %.6f", _L2, risk_output.quantity)
+                halved = risk_output.quantity / 2
+                min_notional = self._exchange.get_min_notional(symbol)
+                notional = halved * current_price
+                if min_notional > 0 and notional < min_notional:
+                    logger.info(
+                        "%s[現貨][覆蓋] 縮半後名義金額 %.2f < 最小 %.0f，維持原量 %.6f",
+                        _L2, notional, min_notional, risk_output.quantity,
+                    )
+                else:
+                    risk_output.quantity = halved
+                    logger.info("%s[現貨][覆蓋] 倉位縮半: %.6f", _L2, risk_output.quantity)
             self._execute_buy(
                 symbol, current_price, risk_output, cycle_id,
                 entry_horizon=horizon,

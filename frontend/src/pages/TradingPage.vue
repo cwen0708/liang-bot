@@ -273,7 +273,7 @@ onMounted(() => {
   const c = getColors()
   chart = createChart(chartContainer.value, {
     width: chartContainer.value.clientWidth,
-    height: window.innerWidth < 768 ? 250 : 400,
+    height: window.innerWidth < 768 ? 250 : 370,
     layout: {
       background: { type: ColorType.Solid, color: c.bg },
       textColor: c.text,
@@ -313,7 +313,7 @@ onMounted(() => {
     if (chart && chartContainer.value) {
       chart.applyOptions({
         width: chartContainer.value.clientWidth,
-        height: window.innerWidth < 768 ? 250 : 400,
+        height: window.innerWidth < 768 ? 250 : 370,
       })
     }
   })
@@ -358,7 +358,7 @@ watch(isDark, async () => {
 
 <template>
   <div class="p-4 md:p-6 space-y-4 md:space-y-6">
-    <h2 class="text-2xl md:text-3xl font-bold">行情</h2>
+    <h2 class="text-2xl font-bold md:hidden">行情</h2>
 
     <!-- Chart: Binance live kline -->
     <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2 md:p-4 shadow-sm dark:shadow-none">

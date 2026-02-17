@@ -13,7 +13,7 @@ const items = [
 
 <template>
   <div class="p-4 md:p-6 space-y-4">
-    <h2 class="text-2xl md:text-3xl font-bold">更多</h2>
+    <h2 class="text-2xl font-bold md:hidden">更多</h2>
     <div class="space-y-2">
       <RouterLink
         v-for="item in items"

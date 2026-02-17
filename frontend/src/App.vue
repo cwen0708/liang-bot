@@ -23,7 +23,6 @@ onMounted(() => {
 const navItems = [
   { to: '/', label: '總覽', icon: 'dashboard' },
   { to: '/trading', label: '行情', icon: 'trading' },
-  { to: '/strategy', label: '策略', icon: 'strategy' },
   { to: '/orders', label: '現貨', icon: 'orders' },
   { to: '/futures', label: '合約', icon: 'futures' },
   { to: '/tx', label: '台指', icon: 'tx' },
@@ -38,7 +37,6 @@ const mobileTabItems = [
   { to: '/', label: '總覽', icon: 'dashboard' },
   { to: '/orders', label: '現貨', icon: 'orders' },
   { to: '/futures', label: '合約', icon: 'futures' },
-  { to: '/strategy', label: '策略', icon: 'strategy' },
   { to: '/more', label: '更多', icon: 'more' },
 ]
 </script>

@@ -47,6 +47,19 @@ class OrderExecutor:
             )
             return None
 
+        # 檢查最小名義金額（notional = qty × price）
+        min_notional = self._exchange.get_min_notional(symbol)
+        if min_notional > 0:
+            ticker = self._exchange.get_ticker(symbol)
+            price = ticker["last"]
+            notional = quantity * price
+            if notional < min_notional:
+                logger.warning(
+                    "%s 名義金額 %.2f 低於最小 %.0f (qty=%.8f, price=%.2f)，跳過",
+                    symbol, notional, min_notional, quantity, price,
+                )
+                return None
+
         if self._use_testnet_live:
             return self._live_execute(side, symbol, quantity, label="Testnet")
         elif self._mode == TradingMode.PAPER:
@@ -130,7 +143,11 @@ class OrderExecutor:
     def _live_execute(self, side: str, symbol: str, quantity: float, label: str = "實盤") -> dict | None:
         """實盤 / Testnet 交易。"""
         logger.info("[%s] 下單: %s %s %.8f", label, side.upper(), symbol, quantity)
-        order = self._exchange.place_market_order(symbol, side, quantity)
+        try:
+            order = self._exchange.place_market_order(symbol, side, quantity)
+        except Exception as e:
+            logger.error("[%s] %s 下單失敗: %s", label, symbol, e)
+            return None
         logger.info(
             "[%s] 成交: ID=%s, 成交量=%.8f, 均價=%.2f",
             label, order["id"], order["filled"], order.get("price", 0),

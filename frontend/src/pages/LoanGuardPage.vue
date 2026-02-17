@@ -247,7 +247,7 @@ onUnmounted(() => {
 
 <template>
   <div class="p-4 md:p-6 space-y-4 md:space-y-6">
-    <h2 class="text-2xl md:text-3xl font-bold">借貸</h2>
+    <h2 class="text-2xl font-bold md:hidden">借貸</h2>
 
     <div v-if="loading" class="text-base text-(--color-text-secondary)">載入中...</div>
     <div v-else-if="!pairKeys.length" class="text-base text-(--color-text-secondary)">無借貸記錄</div>

@@ -105,18 +105,22 @@ class FuturesBinanceClient(BaseFuturesExchange):
             min_qty = 0.0
             step_size = 0.0
             tick_size = 0.0
+            min_notional = 0.0
             for f in s.get("filters", []):
                 if f["filterType"] == "LOT_SIZE":
                     min_qty = float(f.get("minQty", 0))
                     step_size = float(f.get("stepSize", 0))
                 elif f["filterType"] == "PRICE_FILTER":
                     tick_size = float(f.get("tickSize", 0))
+                elif f["filterType"] == "MIN_NOTIONAL":
+                    min_notional = float(f.get("notional", 0))
 
             self._market_info[slash] = {
                 "native": native,
                 "min_qty": min_qty,
                 "step_size": step_size,
                 "tick_size": tick_size,
+                "min_notional": min_notional,
             }
             self._native_map[native] = slash
 
@@ -491,6 +495,13 @@ class FuturesBinanceClient(BaseFuturesExchange):
         info = self._market_info.get(symbol)
         if info:
             return info["min_qty"]
+        return 0.0
+
+    def get_min_notional(self, symbol: str) -> float:
+        """取得最小名義金額（notional = qty × price）。"""
+        info = self._market_info.get(symbol)
+        if info:
+            return info.get("min_notional", 0.0)
         return 0.0
 
     def _round_step(self, value: float, step: float) -> float:

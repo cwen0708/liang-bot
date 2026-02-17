@@ -56,7 +56,7 @@ function formatTime(ts: string) {
 <template>
   <div class="flex flex-col h-[calc(100dvh-60px-64px)] md:h-screen md:overflow-hidden p-4 md:p-6 gap-4 md:gap-6">
     <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 shrink-0">
-      <h2 class="text-2xl md:text-3xl font-bold">日誌</h2>
+      <h2 class="text-2xl font-bold md:hidden">日誌</h2>
       <div class="flex gap-2 w-full sm:w-auto">
         <select
           v-model="filterLevel"

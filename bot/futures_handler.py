@@ -379,11 +379,21 @@ class FuturesHandler:
             return
 
         if decision.llm_override and risk_output.quantity > 0:
-            risk_output.quantity /= 2
-            logger.info("%s[合約][覆蓋] 倉位縮半: %.6f", _L2, risk_output.quantity)
+            halved = risk_output.quantity / 2
+            min_notional = self._exchange.get_min_notional(symbol)
+            notional = halved * price
+            if min_notional > 0 and notional < min_notional:
+                logger.info(
+                    "%s[合約][覆蓋] 縮半後名義金額 %.2f < 最小 %.0f，維持原量 %.6f",
+                    _L2, notional, min_notional, risk_output.quantity,
+                )
+            else:
+                risk_output.quantity = halved
+                logger.info("%s[合約][覆蓋] 倉位縮半: %.6f", _L2, risk_output.quantity)
 
         order = self._executor.execute(signal, symbol, risk_output)
         if not order:
+            logger.info("%s[合約] %s 下單失敗，跳過", _L2, symbol)
             return
 
         fill_price = order.get("price", price)

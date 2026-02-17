@@ -204,7 +204,7 @@ const expandedIdx = ref<number | null>(null)
     <!-- Header -->
     <div class="flex items-center justify-between gap-2 shrink-0 flex-wrap">
       <div class="flex items-center gap-3">
-        <h2 class="text-2xl md:text-3xl font-bold">台指</h2>
+        <h2 class="text-2xl font-bold md:hidden">台指</h2>
         <div class="flex items-center gap-1.5">
           <span
             class="w-2 h-2 rounded-full"

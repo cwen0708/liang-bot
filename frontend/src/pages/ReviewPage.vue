@@ -19,7 +19,7 @@ async function fetchReviews() {
     .select('*')
     .eq('mode', bot.globalMode)
     .order('review_date', { ascending: false })
-    .limit(14)
+    .limit(30)
   if (data) reviews.value = data as DailyReview[]
   loading.value = false
 }
@@ -50,16 +50,98 @@ const scoreDimensions = [
   { key: 'overall', label: '總分' },
 ] as const
 
-// Trend: last 7 reviews' overall score
+// Trend: all reviews (up to 30 days), reversed to chronological
 const trendData = computed(() =>
   [...reviews.value]
-    .slice(0, 7)
     .reverse()
     .map(r => ({
       date: r.review_date,
-      score: r.scores?.overall ?? 0,
+      overall: (r.scores as any)?.overall ?? 0,
+      strategy: (r.scores as any)?.strategy_accuracy ?? 0,
+      risk: (r.scores as any)?.risk_execution ?? 0,
+      pnl: (r.scores as any)?.pnl_performance ?? 0,
+      prompt: (r.scores as any)?.prompt_quality ?? 0,
     })),
 )
+
+// SVG line chart helpers
+const chartW = 600
+const chartH = 160
+const chartPadX = 36
+const chartPadTop = 8
+const chartPadBottom = 24
+
+const trendLines = computed(() => {
+  const data = trendData.value
+  if (data.length < 2) return []
+  const n = data.length
+  const xStep = (chartW - chartPadX * 2) / (n - 1)
+
+  const lines: { key: string; label: string; color: string; points: string; dots: { x: number; y: number; val: number }[] }[] = []
+
+  const configs = [
+    { key: 'overall', label: '總分', color: 'var(--color-accent, #6366f1)' },
+    { key: 'strategy', label: '策略', color: '#f59e0b' },
+    { key: 'risk', label: '風控', color: '#10b981' },
+    { key: 'pnl', label: '損益', color: '#ef4444' },
+    { key: 'prompt', label: 'Prompt', color: '#8b5cf6' },
+  ]
+
+  for (const cfg of configs) {
+    const dots: { x: number; y: number; val: number }[] = []
+    for (let i = 0; i < n; i++) {
+      const x = chartPadX + i * xStep
+      const val = (data[i] as any)[cfg.key] as number
+      const y = chartPadTop + (1 - val) * (chartH - chartPadTop - chartPadBottom)
+      dots.push({ x, y, val })
+    }
+    lines.push({
+      key: cfg.key,
+      label: cfg.label,
+      color: cfg.color,
+      points: dots.map(d => `${d.x},${d.y}`).join(' '),
+      dots,
+    })
+  }
+  return lines
+})
+
+// X-axis labels for the trend chart
+const trendXLabels = computed(() => {
+  const data = trendData.value
+  if (data.length < 2) return []
+  const n = data.length
+  const xStep = (chartW - chartPadX * 2) / (n - 1)
+  // Show at most ~6 labels
+  const step = Math.max(1, Math.floor(n / 6))
+  const labels: { x: number; text: string }[] = []
+  for (let i = 0; i < n; i += step) {
+    labels.push({
+      x: chartPadX + i * xStep,
+      text: data[i]!.date.slice(5), // MM-DD
+    })
+  }
+  // Always include last
+  if (labels[labels.length - 1]?.x !== chartPadX + (n - 1) * xStep) {
+    labels.push({
+      x: chartPadX + (n - 1) * xStep,
+      text: data[n - 1]!.date.slice(5),
+    })
+  }
+  return labels
+})
+
+// Toggle which lines are visible
+const visibleLines = ref(new Set(['overall']))
+function toggleLine(key: string) {
+  const s = new Set(visibleLines.value)
+  if (s.has(key)) { if (s.size > 1) s.delete(key) } // keep at least 1
+  else s.add(key)
+  visibleLines.value = s
+}
+
+// Hover state for trend chart
+const hoverIdx = ref<number | null>(null)
 
 // Suggestion helpers
 function priorityBorder(p: string): string {
@@ -119,17 +201,17 @@ function formatDate(d: string): string {
 </script>
 
 <template>
-  <div class="p-4 md:p-6 flex flex-col gap-4 md:gap-5 md:h-[calc(100vh)] md:overflow-hidden">
+  <div class="p-4 md:p-6 space-y-4 md:space-y-6">
     <!-- Header -->
-    <div class="flex items-center justify-between shrink-0">
-      <h2 class="text-2xl md:text-3xl font-bold">復盤</h2>
+    <div class="flex items-center justify-between md:hidden">
+      <h2 class="text-2xl font-bold">復盤</h2>
       <div class="text-sm text-(--color-text-secondary)">
         透過 <code class="px-1.5 py-0.5 bg-(--color-bg-secondary) rounded text-xs">/review</code> 產生報告
       </div>
     </div>
 
-    <!-- Scrollable -->
-    <div class="flex flex-col gap-4 md:gap-5 min-h-0 flex-1 overflow-auto">
+    <!-- Content -->
+    <div class="flex flex-col gap-4 md:gap-5">
 
       <!-- Loading / Empty -->
       <div v-if="loading" class="text-center py-12 text-(--color-text-secondary)">載入中...</div>
@@ -189,25 +271,113 @@ function formatDate(d: string): string {
             </div>
           </div>
 
-          <!-- Score Trend (last 7) -->
+          <!-- Score Trend (line chart, up to 30 days) -->
           <div v-if="trendData.length > 1" class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-4 shadow-sm dark:shadow-none">
-            <h3 class="font-semibold text-base mb-3">總分趨勢</h3>
-            <div class="flex items-end gap-1 h-20">
-              <div
-                v-for="(pt, i) in trendData"
-                :key="i"
-                class="flex-1 rounded-t transition-all relative group"
-                :class="scoreColor(pt.score)"
-                :style="{ height: Math.max(pt.score * 100, 4) + '%' }"
-              >
-                <div class="absolute -top-5 left-1/2 -translate-x-1/2 text-[10px] font-mono text-(--color-text-secondary) opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                  {{ (pt.score * 100).toFixed(0) }}
-                </div>
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="font-semibold text-base">評分趨勢</h3>
+              <div class="flex gap-1 flex-wrap">
+                <button
+                  v-for="line in trendLines"
+                  :key="line.key"
+                  class="px-2 py-0.5 rounded text-[11px] font-medium transition-all border"
+                  :class="visibleLines.has(line.key)
+                    ? 'border-transparent text-white'
+                    : 'border-(--color-border) text-(--color-text-muted) opacity-50'"
+                  :style="visibleLines.has(line.key) ? { backgroundColor: line.color } : {}"
+                  @click="toggleLine(line.key)"
+                >{{ line.label }}</button>
               </div>
             </div>
-            <div class="flex justify-between text-[10px] text-(--color-text-muted) mt-1.5">
-              <span v-if="trendData.length">{{ trendData[0]?.date }}</span>
-              <span v-if="trendData.length > 1">{{ trendData[trendData.length - 1]?.date }}</span>
+
+            <!-- SVG Chart -->
+            <div class="w-full overflow-x-auto">
+              <svg
+                :viewBox="`0 0 ${chartW} ${chartH}`"
+                class="w-full min-w-[320px]"
+                preserveAspectRatio="xMidYMid meet"
+                @mouseleave="hoverIdx = null"
+              >
+                <!-- Y-axis grid lines -->
+                <line v-for="y in [0, 0.25, 0.5, 0.75, 1.0]" :key="y"
+                  :x1="chartPadX" :x2="chartW - chartPadX"
+                  :y1="chartPadTop + (1 - y) * (chartH - chartPadTop - chartPadBottom)"
+                  :y2="chartPadTop + (1 - y) * (chartH - chartPadTop - chartPadBottom)"
+                  stroke="var(--color-border, #e5e7eb)" stroke-width="0.5" stroke-dasharray="3,3"
+                />
+                <!-- Y-axis labels -->
+                <text v-for="y in [0, 0.25, 0.5, 0.75, 1.0]" :key="'yl'+y"
+                  :x="chartPadX - 4"
+                  :y="chartPadTop + (1 - y) * (chartH - chartPadTop - chartPadBottom) + 3"
+                  text-anchor="end" fill="var(--color-text-muted, #9ca3af)" font-size="9" font-family="monospace"
+                >{{ (y * 100).toFixed(0) }}</text>
+
+                <!-- Lines -->
+                <template v-for="line in trendLines" :key="line.key">
+                  <polyline
+                    v-if="visibleLines.has(line.key)"
+                    :points="line.points"
+                    fill="none"
+                    :stroke="line.color"
+                    :stroke-width="line.key === 'overall' ? 2.5 : 1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    :opacity="line.key === 'overall' ? 1 : 0.7"
+                  />
+                </template>
+
+                <!-- Hover overlay (invisible rects for each data point) -->
+                <rect
+                  v-for="(pt, i) in trendData"
+                  :key="'hover'+i"
+                  :x="chartPadX + i * ((chartW - chartPadX * 2) / (trendData.length - 1)) - (chartW - chartPadX * 2) / (trendData.length - 1) / 2"
+                  :y="chartPadTop"
+                  :width="(chartW - chartPadX * 2) / (trendData.length - 1)"
+                  :height="chartH - chartPadTop - chartPadBottom"
+                  fill="transparent"
+                  @mouseenter="hoverIdx = i"
+                />
+
+                <!-- Hover vertical line -->
+                <line
+                  v-if="hoverIdx !== null"
+                  :x1="chartPadX + hoverIdx * ((chartW - chartPadX * 2) / (trendData.length - 1))"
+                  :x2="chartPadX + hoverIdx * ((chartW - chartPadX * 2) / (trendData.length - 1))"
+                  :y1="chartPadTop" :y2="chartH - chartPadBottom"
+                  stroke="var(--color-text-muted, #9ca3af)" stroke-width="0.5" stroke-dasharray="2,2"
+                />
+
+                <!-- Dots on hover -->
+                <template v-if="hoverIdx !== null">
+                  <template v-for="line in trendLines" :key="'dot'+line.key">
+                    <circle
+                      v-if="visibleLines.has(line.key) && line.dots[hoverIdx!]"
+                      :cx="line.dots[hoverIdx!]!.x"
+                      :cy="line.dots[hoverIdx!]!.y"
+                      r="3.5"
+                      :fill="line.color"
+                      stroke="var(--color-bg-card, #fff)" stroke-width="1.5"
+                    />
+                  </template>
+                </template>
+
+                <!-- X-axis labels -->
+                <text
+                  v-for="lbl in trendXLabels"
+                  :key="lbl.x"
+                  :x="lbl.x" :y="chartH - 4"
+                  text-anchor="middle" fill="var(--color-text-muted, #9ca3af)" font-size="9" font-family="monospace"
+                >{{ lbl.text }}</text>
+              </svg>
+            </div>
+
+            <!-- Hover tooltip -->
+            <div v-if="hoverIdx !== null && trendData[hoverIdx!]" class="flex items-center gap-3 mt-2 text-xs text-(--color-text-secondary) flex-wrap">
+              <span class="font-medium text-(--color-text-primary)">{{ trendData[hoverIdx!]!.date }}</span>
+              <template v-for="line in trendLines" :key="'tip'+line.key">
+                <span v-if="visibleLines.has(line.key)" class="font-mono" :style="{ color: line.color }">
+                  {{ line.label }} {{ ((trendData[hoverIdx!] as any)[line.key] * 100).toFixed(0) }}
+                </span>
+              </template>
             </div>
           </div>
 
@@ -264,6 +434,6 @@ function formatDate(d: string): string {
         </template>
       </template>
 
-    </div><!-- /scrollable -->
+    </div><!-- /content -->
   </div>
 </template>

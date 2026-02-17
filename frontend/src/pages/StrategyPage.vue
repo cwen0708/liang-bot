@@ -248,18 +248,16 @@ const drawerDecision = ref<LLMDecision | null>(null)
 </script>
 
 <template>
-  <div class="p-4 md:p-6 md:pb-0 flex flex-col gap-4 md:gap-6 md:h-[calc(100vh)] md:overflow-hidden">
+  <div class="p-4 md:p-6 space-y-4 md:space-y-6">
     <!-- Header -->
-    <div class="shrink-0">
-      <h2 class="text-2xl md:text-3xl font-bold">策略</h2>
-    </div>
+    <h2 class="text-2xl font-bold md:hidden">策略</h2>
 
     <!-- Loading -->
     <div v-if="dLoading" class="text-base text-(--color-text-secondary)">載入中...</div>
     <div v-else-if="!spotSymbols.length && !futuresSymbols.length" class="text-base text-(--color-text-secondary)">無記錄</div>
 
-    <!-- Content: vertically scrollable -->
-    <div v-else class="flex flex-col gap-6 min-h-0 md:flex-1 md:overflow-auto pb-4">
+    <!-- Content -->
+    <div v-else class="flex flex-col gap-6">
 
       <!-- ===== Spot Section ===== -->
       <section v-if="spotSymbols.length">

@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, onUnmounted, computed, watch } from 'vue'
 import { useBotStore } from '@/stores/bot'
 import { useSupabase } from '@/composables/useSupabase'
 import { useRealtimeTable } from '@/composables/useRealtime'
-import StrategyDecisionSection from '@/components/StrategyDecisionSection.vue'
-import type { Order, LLMDecision } from '@/types'
+import DecisionDrawer from '@/components/DecisionDrawer.vue'
+import type { Order, LLMDecision, StrategyVerdict } from '@/types'
 
 const bot = useBotStore()
 const supabase = useSupabase()
@@ -447,17 +447,119 @@ async function copyPageText() {
     setTimeout(() => { copySuccess.value = false }, 2000)
   }
 }
+
+// ─── Strategy Decisions (inline per symbol) ─────────────
+const sdDecisions = ref<LLMDecision[]>([])
+const sdLoading = ref(true)
+const sdVerdictCache = new Map<string, StrategyVerdict[]>()
+
+function sdDecisionKey(d: LLMDecision) {
+  return `${d.symbol}:${d.market_type ?? 'spot'}:${d.action}`
+}
+
+async function sdFetch() {
+  sdLoading.value = true
+  const { data } = await supabase.rpc('get_latest_decisions', { p_mode: bot.globalMode })
+  if (data) {
+    sdDecisions.value = (data as LLMDecision[]).filter(d => d.market_type === 'spot')
+    for (const d of sdDecisions.value) {
+      const raw = (d as any).verdicts
+      if (raw && Array.isArray(raw) && raw.length)
+        sdVerdictCache.set(`${d.cycle_id}:${d.symbol}`, raw as StrategyVerdict[])
+    }
+  }
+  sdLoading.value = false
+}
+sdFetch()
+watch(() => bot.globalMode, () => sdFetch())
+
+const sdRtChannel = supabase
+  .channel('rt:llm_decisions:spot-inline')
+  .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'llm_decisions' }, (payload) => {
+    const r = payload.new as LLMDecision
+    if ((r.mode ?? 'live') !== bot.globalMode || r.market_type !== 'spot') return
+    const key = sdDecisionKey(r)
+    sdDecisions.value = [r, ...sdDecisions.value.filter(d => sdDecisionKey(d) !== key)]
+    if (r.cycle_id) {
+      const ck = `${r.cycle_id}:${r.symbol}`
+      if (!sdVerdictCache.has(ck)) {
+        supabase.from('strategy_verdicts').select('*').eq('cycle_id', r.cycle_id).eq('symbol', r.symbol)
+          .then(({ data }) => { if (data?.length) sdVerdictCache.set(ck, data as StrategyVerdict[]) })
+      }
+    }
+  })
+  .subscribe()
+onUnmounted(() => { supabase.removeChannel(sdRtChannel) })
+
+const sdActionOrder = ['BUY', 'HOLD', 'SELL'] as const
+const sdLabels: Record<string, string> = { BUY: '買入', HOLD: '觀望', SELL: '賣出' }
+
+type SDGroupedCol = { action: string; label: string; cards: LLMDecision[] }
+
+function sdGetGrouped(symbol: string): SDGroupedCol[] {
+  return sdActionOrder.map(action => ({
+    action, label: sdLabels[action] ?? action,
+    cards: sdDecisions.value
+      .filter(d => d.symbol === symbol && d.action === action)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(0, 1),
+  }))
+}
+
+function sdHasDecisions(symbol: string): boolean {
+  return sdDecisions.value.some(d => d.symbol === symbol)
+}
+
+const sdAllStrategies = ['sma_crossover', 'rsi_oversold', 'bollinger_breakout', 'macd_momentum', 'vwap_reversion', 'ema_ribbon', 'tia_orderflow']
+const sdStrategyShort: Record<string, string> = {
+  sma_crossover: 'SMA', rsi_oversold: 'RSI', bollinger_breakout: 'BOLL',
+  macd_momentum: 'MACD', vwap_reversion: 'VWAP', ema_ribbon: 'EMA', tia_orderflow: 'OFlow',
+}
+
+type SDVerdictSlot = { strategy: string; verdict: StrategyVerdict | null }
+
+function sdGetVerdictSlots(d: LLMDecision): SDVerdictSlot[] {
+  const matched = sdVerdictCache.get(`${d.cycle_id}:${d.symbol}`) ?? []
+  const best = new Map<string, StrategyVerdict>()
+  for (const v of matched) {
+    const prev = best.get(v.strategy)
+    if (!prev || v.confidence > prev.confidence) best.set(v.strategy, v)
+  }
+  return sdAllStrategies.map(s => ({ strategy: s, verdict: best.get(s) ?? null }))
+}
+
+function sdTimeAgo(ts: string): string {
+  const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000)
+  if (diff < 60) return `${diff}秒前`
+  if (diff < 3600) return `${Math.floor(diff / 60)}分前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}小時前`
+  return `${Math.floor(diff / 86400)}天前`
+}
+
+function sdSignalLabel(s: string) { return s === 'BUY' ? '買入' : s === 'SELL' ? '賣出' : '觀望' }
+function sdBadgeClass(a: string) { return a === 'BUY' ? 'text-(--color-success)' : a === 'SELL' ? 'text-(--color-danger)' : 'text-(--color-text-secondary)' }
+function sdDotColor(a: string) { return a === 'BUY' ? 'var(--color-success)' : a === 'SELL' ? 'var(--color-danger)' : 'var(--color-text-secondary)' }
+function sdBarColor(s: string) { return s === 'BUY' ? 'var(--color-success)' : s === 'SELL' ? 'var(--color-danger)' : 'var(--color-text-secondary)' }
+
+function sdCardStyle(d: LLMDecision): Record<string, string> {
+  const now = new Date(); const dt = new Date(d.created_at)
+  const days = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() - new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()).getTime()) / 86400000)
+  const style: Record<string, string> = {}
+  if (days === 0) style.borderColor = 'color-mix(in srgb, var(--color-warning) 60%, transparent)'
+  if (days > 0) style.opacity = ({ 1: '0.8', 2: '0.6', 3: '0.4' } as Record<number, string>)[days] ?? '0.4'
+  return style
+}
+
+const sdDrawerDecision = ref<LLMDecision | null>(null)
 </script>
 
 <template>
-  <div class="p-4 md:p-6 flex flex-col gap-4 md:gap-6 md:h-[calc(100vh)] md:overflow-hidden">
-    <!-- Header -->
-    <div class="shrink-0">
-      <h2 class="text-2xl md:text-3xl font-bold">現貨</h2>
-    </div>
-
+  <div class="p-4 md:p-6 flex flex-col md:h-[calc(100vh)] md:overflow-hidden">
     <!-- Scrollable content -->
     <div class="flex flex-col gap-4 md:gap-5 min-h-0 md:flex-1 md:overflow-auto">
+
+    <!-- Header -->
+    <h2 class="text-2xl md:text-3xl font-bold shrink-0">現貨</h2>
 
     <!-- Toolbar -->
     <div class="flex items-center justify-end gap-2 shrink-0 flex-wrap">
@@ -515,7 +617,7 @@ async function copyPageText() {
     </div>
 
     <!-- Summary Cards -->
-    <div class="grid grid-cols-3 md:grid-cols-5 gap-2 md:gap-3">
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-2 md:gap-3">
       <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-2.5 md:p-3 shadow-sm dark:shadow-none">
         <div class="text-xs text-(--color-text-secondary)">USDT 餘額</div>
         <div class="text-lg md:text-xl font-bold font-mono mt-0.5">
@@ -641,9 +743,6 @@ async function copyPageText() {
         </div>
       </section>
 
-      <!-- ===== Strategy Decisions ===== -->
-      <StrategyDecisionSection market-type="spot" :filter-symbol="filterSymbol" />
-
       <!-- ===== PAIRS VIEW (grouped by symbol) ===== -->
       <section v-if="viewMode === 'pairs'" class="flex flex-col min-h-0">
         <div class="flex items-center justify-between mb-2 shrink-0">
@@ -685,6 +784,69 @@ async function copyPageText() {
 
             <!-- Group content (collapsible) -->
             <div v-if="!collapsedSymbols.has(group.symbol)" class="border-t border-(--color-border)">
+
+              <!-- Inline strategy decisions for this symbol -->
+              <div v-if="sdHasDecisions(group.symbol)" class="border-b border-(--color-border)/50">
+                <!-- Desktop: 3 action columns -->
+                <div class="hidden md:grid grid-cols-[1fr_1fr_1fr] gap-0">
+                  <template v-for="(col, ci) in sdGetGrouped(group.symbol)" :key="col.action">
+                    <div class="px-1.5 py-2" :class="{ 'border-r border-(--color-border)/30': ci < 2 }">
+                      <div class="flex items-center gap-1 mb-1 px-0.5">
+                        <div class="w-1.5 h-1.5 rounded-full" :style="{ backgroundColor: sdDotColor(col.action) }"></div>
+                        <span class="text-[9px] font-semibold" :class="sdBadgeClass(col.action)">{{ col.label }}</span>
+                      </div>
+                      <div v-for="d in col.cards" :key="d.id"
+                        class="sd-card relative border border-(--color-border) rounded-lg cursor-pointer hover:border-(--color-accent)/50 transition-colors h-[90px] overflow-hidden"
+                        :style="sdCardStyle(d)" @click="sdDrawerDecision = d">
+                        <div class="absolute inset-x-0 bottom-0 flex items-end justify-center gap-[3px] h-full px-1.5 pb-0.5 pointer-events-none">
+                          <div v-for="slot in sdGetVerdictSlots(d)" :key="slot.strategy" class="flex-1 rounded-t-sm"
+                            :style="{ height: slot.verdict ? `${Math.max(slot.verdict.confidence * 100, 8)}%` : '8%', backgroundColor: slot.verdict ? sdBarColor(slot.verdict.signal) : 'var(--color-border)', opacity: slot.verdict ? '0.10' : '0.04' }"
+                            :title="`${sdStrategyShort[slot.strategy] ?? slot.strategy}: ${slot.verdict ? (slot.verdict.confidence * 100).toFixed(0) + '% ' + sdSignalLabel(slot.verdict.signal) : '-'}`"
+                          ></div>
+                        </div>
+                        <span class="absolute top-0 right-0 text-[9px] text-(--color-text-muted) bg-(--color-bg-card)/80 px-1 py-px rounded">{{ sdTimeAgo(d.created_at) }}</span>
+                        <div class="relative z-10 p-1.5 h-full flex flex-col overflow-hidden">
+                          <span v-if="d.executed === false" class="text-[9px] px-1 py-px rounded bg-(--color-warning-subtle) text-(--color-warning) font-medium self-start mb-0.5 shrink-0">攔截</span>
+                          <div class="text-[11px] text-(--color-text-secondary) leading-relaxed line-clamp-3 flex-1">{{ d.reasoning }}</div>
+                        </div>
+                      </div>
+                      <div v-if="!col.cards.length" class="rounded-lg border border-dashed flex items-center justify-center h-[90px]"
+                        :style="{ borderColor: `color-mix(in srgb, ${sdDotColor(col.action)} 20%, transparent)` }">
+                        <span class="text-[9px] text-(--color-text-muted) opacity-30">-</span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+                <!-- Mobile: 3 columns -->
+                <div class="md:hidden grid grid-cols-3 gap-0">
+                  <template v-for="(col, ci) in sdGetGrouped(group.symbol)" :key="col.action">
+                    <div class="px-1.5 py-2" :class="{ 'border-r border-(--color-border)/30': ci < 2 }">
+                      <div class="flex items-center gap-1 mb-1 px-0.5">
+                        <div class="w-1.5 h-1.5 rounded-full" :style="{ backgroundColor: sdDotColor(col.action) }"></div>
+                        <span class="text-[9px] font-semibold" :class="sdBadgeClass(col.action)">{{ col.label }}</span>
+                      </div>
+                      <div v-for="d in col.cards" :key="d.id"
+                        class="sd-card relative border border-(--color-border) rounded-lg cursor-pointer h-[80px] overflow-hidden"
+                        :style="sdCardStyle(d)" @click="sdDrawerDecision = d">
+                        <div class="absolute inset-x-0 bottom-0 flex items-end justify-center gap-[3px] h-full px-1.5 pb-0.5 pointer-events-none">
+                          <div v-for="slot in sdGetVerdictSlots(d)" :key="slot.strategy" class="flex-1 rounded-t-sm"
+                            :style="{ height: slot.verdict ? `${Math.max(slot.verdict.confidence * 100, 8)}%` : '8%', backgroundColor: slot.verdict ? sdBarColor(slot.verdict.signal) : 'var(--color-border)', opacity: slot.verdict ? '0.10' : '0.04' }"
+                          ></div>
+                        </div>
+                        <span class="absolute top-0 right-0 text-[9px] text-(--color-text-muted) bg-(--color-bg-card)/80 px-1 py-px rounded">{{ sdTimeAgo(d.created_at) }}</span>
+                        <div class="relative z-10 p-1.5 h-full flex flex-col overflow-hidden">
+                          <div class="text-[11px] text-(--color-text-secondary) leading-relaxed line-clamp-3 flex-1">{{ d.reasoning }}</div>
+                        </div>
+                      </div>
+                      <div v-if="!col.cards.length" class="rounded-lg border border-dashed flex items-center justify-center h-[80px]"
+                        :style="{ borderColor: `color-mix(in srgb, ${sdDotColor(col.action)} 20%, transparent)` }">
+                        <span class="text-[9px] text-(--color-text-muted) opacity-30">-</span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+
               <!-- Desktop table -->
               <table class="w-full text-base hidden md:table">
                 <thead>
@@ -735,7 +897,11 @@ async function copyPageText() {
                       <td colspan="7" class="pb-3 pt-0 px-4">
                         <div v-if="!pairDecisions.has(pair.id)" class="text-sm text-(--color-text-secondary)">載入 AI 決策...</div>
                         <div v-else class="grid md:grid-cols-2 gap-3">
-                          <div class="bg-(--color-bg-secondary) rounded-lg p-3 text-sm">
+                          <div
+                            class="bg-(--color-bg-secondary) rounded-lg p-3 text-sm transition-colors"
+                            :class="pairDecisions.get(pair.id)?.entry ? 'cursor-pointer hover:bg-(--color-bg-secondary)/80' : ''"
+                            @click.stop="pairDecisions.get(pair.id)?.entry && (sdDrawerDecision = pairDecisions.get(pair.id)!.entry)"
+                          >
                             <div class="flex items-center gap-2 mb-1.5">
                               <span class="text-xs font-bold text-(--color-success)">開倉決策</span>
                               <span v-if="pairDecisions.get(pair.id)?.entry" class="text-xs text-(--color-text-secondary)">
@@ -745,7 +911,11 @@ async function copyPageText() {
                             <p v-if="pairDecisions.get(pair.id)?.entry" class="text-(--color-text-primary) leading-relaxed whitespace-pre-wrap text-sm">{{ pairDecisions.get(pair.id)!.entry!.reasoning }}</p>
                             <p v-else class="text-(--color-text-secondary)">無 AI 決策記錄</p>
                           </div>
-                          <div class="bg-(--color-bg-secondary) rounded-lg p-3 text-sm">
+                          <div
+                            class="bg-(--color-bg-secondary) rounded-lg p-3 text-sm transition-colors"
+                            :class="pairDecisions.get(pair.id)?.exit ? 'cursor-pointer hover:bg-(--color-bg-secondary)/80' : ''"
+                            @click.stop="pairDecisions.get(pair.id)?.exit && (sdDrawerDecision = pairDecisions.get(pair.id)!.exit)"
+                          >
                             <div class="flex items-center gap-2 mb-1.5">
                               <span class="text-xs font-bold text-(--color-danger)">平倉決策</span>
                               <span v-if="pairDecisions.get(pair.id)?.exit" class="text-xs text-(--color-text-secondary)">
@@ -791,10 +961,13 @@ async function copyPageText() {
                     <div class="text-right">{{ formatDuration(pair.holdDurationMs) }}</div>
                   </div>
                   <!-- Expanded AI decisions -->
-                  <div v-if="expandedPairId === pair.id" class="mt-2 pt-2 border-t border-(--color-border)/50 space-y-2">
+                  <div v-if="expandedPairId === pair.id" class="mt-2 pt-2 border-t border-(--color-border)/50 space-y-2" @click.stop>
                     <div v-if="!pairDecisions.has(pair.id)" class="text-xs text-(--color-text-secondary)">載入 AI 決策...</div>
                     <template v-else>
-                      <div>
+                      <div
+                        :class="pairDecisions.get(pair.id)?.entry ? 'cursor-pointer active:bg-(--color-bg-card)/50 rounded-lg -mx-1 px-1 py-0.5' : ''"
+                        @click="pairDecisions.get(pair.id)?.entry && (sdDrawerDecision = pairDecisions.get(pair.id)!.entry)"
+                      >
                         <div class="flex items-center gap-2 mb-1">
                           <span class="text-xs font-bold text-(--color-success)">開倉決策</span>
                           <span v-if="pairDecisions.get(pair.id)?.entry" class="text-xs text-(--color-text-secondary)">信心 {{ (pairDecisions.get(pair.id)!.entry!.confidence * 100).toFixed(0) }}%</span>
@@ -802,7 +975,10 @@ async function copyPageText() {
                         <p v-if="pairDecisions.get(pair.id)?.entry" class="text-sm text-(--color-text-primary) leading-relaxed whitespace-pre-wrap">{{ pairDecisions.get(pair.id)!.entry!.reasoning }}</p>
                         <p v-else class="text-xs text-(--color-text-secondary)">無 AI 決策記錄</p>
                       </div>
-                      <div>
+                      <div
+                        :class="pairDecisions.get(pair.id)?.exit ? 'cursor-pointer active:bg-(--color-bg-card)/50 rounded-lg -mx-1 px-1 py-0.5' : ''"
+                        @click="pairDecisions.get(pair.id)?.exit && (sdDrawerDecision = pairDecisions.get(pair.id)!.exit)"
+                      >
                         <div class="flex items-center gap-2 mb-1">
                           <span class="text-xs font-bold text-(--color-danger)">平倉決策</span>
                           <span v-if="pairDecisions.get(pair.id)?.exit" class="text-xs text-(--color-text-secondary)">信心 {{ (pairDecisions.get(pair.id)!.exit!.confidence * 100).toFixed(0) }}%</span>
@@ -965,5 +1141,17 @@ async function copyPageText() {
         </div>
       </section>
     </div>
+
+    <DecisionDrawer :decision="sdDrawerDecision" @close="sdDrawerDecision = null" />
   </div>
 </template>
+
+<style scoped>
+.sd-card {
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+  text-shadow: 0 0 1px #999;
+}
+.sd-card:hover {
+  box-shadow: 0 2px 4px 0 rgb(0 0 0 / 0.06);
+}
+</style>

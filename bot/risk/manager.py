@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
@@ -95,6 +95,7 @@ class RiskManager:
                 "take_profit_price": take_profit_price,
                 "entry_horizon": entry_horizon,
                 "entry_reasoning": entry_reasoning,
+                "opened_at": datetime.now(timezone.utc).isoformat(),
             }
         logger.info(
             "確認持倉: %s qty=%.8f entry=%.2f SL=%.2f TP=%.2f",
@@ -427,6 +428,7 @@ class RiskManager:
                 "take_profit_price": take_profit_price,
                 "entry_horizon": entry_horizon,
                 "entry_reasoning": entry_reasoning,
+                "opened_at": datetime.now(timezone.utc).isoformat(),
             }
         logger.info(
             "新增持倉: %s qty=%.8f entry=%.2f SL=%.2f TP=%.2f",

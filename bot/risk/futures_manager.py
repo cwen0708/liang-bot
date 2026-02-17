@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
@@ -121,6 +121,7 @@ class FuturesRiskManager:
                 "take_profit_price": take_profit_price,
                 "entry_horizon": entry_horizon,
                 "entry_reasoning": entry_reasoning,
+                "opened_at": datetime.now(timezone.utc).isoformat(),
             }
         side_label = "多" if side == "long" else "空"
         logger.info(
@@ -573,6 +574,7 @@ class FuturesRiskManager:
                 "take_profit_price": take_profit_price,
                 "entry_horizon": entry_horizon,
                 "entry_reasoning": entry_reasoning,
+                "opened_at": datetime.now(timezone.utc).isoformat(),
             }
         side_label = "多" if side == "long" else "空"
         logger.info(

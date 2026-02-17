@@ -318,6 +318,14 @@ class SpotHandler:
             )
 
         elif final_signal == Signal.SELL:
+            hold_min = self._get_hold_minutes(symbol)
+            min_hold = self._min_hold_for_horizon(symbol)
+            if hold_min is not None and hold_min < min_hold:
+                logger.info(
+                    "%s[現貨] %s 持倉僅 %d 分鐘，最低 %d 分鐘 → 暫不平倉",
+                    _L2, symbol, hold_min, min_hold,
+                )
+                return
             self._execute_sell(symbol, current_price, cycle_id)
 
     def _execute_buy(
@@ -425,6 +433,29 @@ class SpotHandler:
         logger.info("%s[現貨] %s 冷卻中，剩餘 %.0f 分鐘", _L2, symbol, remaining)
         return True
 
+    # ── 最低持倉時間 ──
+
+    _HORIZON_MIN_HOLD = {"short": 60, "medium": 240, "long": 480}
+
+    def _get_hold_minutes(self, symbol: str) -> int | None:
+        """回傳該 symbol 已持倉多少分鐘，無持倉回傳 None。"""
+        pos = self._risk.get_position(symbol)
+        if pos is None:
+            return None
+        opened_at = pos.get("opened_at")
+        if not opened_at:
+            return None
+        opened = datetime.fromisoformat(opened_at)
+        return int((datetime.now(timezone.utc) - opened).total_seconds() / 60)
+
+    def _min_hold_for_horizon(self, symbol: str) -> int:
+        """根據 entry_horizon 回傳最低持倉分鐘數。"""
+        pos = self._risk.get_position(symbol)
+        if pos is None:
+            return 0
+        horizon = pos.get("entry_horizon", "short")
+        return self._HORIZON_MIN_HOLD.get(horizon, 60)
+
     def _sync_oco_order(self, symbol: str) -> bool:
         """檢查交易所 OCO 訂單是否已成交。"""
         tp_id, sl_id = self._risk.get_sl_tp_order_ids(symbol)
@@ -472,6 +503,16 @@ class SpotHandler:
             pnl = (price - entry) * qty
             pnl_pct = (price - entry) / entry if entry > 0 else 0.0
 
+            # 計算持倉時長
+            opened_at = pos_data.get("opened_at")
+            hold_str = ""
+            if opened_at:
+                hold_min = int((datetime.now(timezone.utc) - datetime.fromisoformat(opened_at)).total_seconds() / 60)
+                if hold_min >= 60:
+                    hold_str = f"{hold_min // 60}h{hold_min % 60}m"
+                else:
+                    hold_str = f"{hold_min}m"
+
             positions.append(PositionInfo(
                 symbol=sym,
                 quantity=qty,
@@ -481,6 +522,7 @@ class SpotHandler:
                 unrealized_pnl_pct=pnl_pct,
                 entry_horizon=pos_data.get("entry_horizon", ""),
                 entry_reasoning=pos_data.get("entry_reasoning", ""),
+                holding_duration=hold_str,
             ))
 
         sc = self._settings.spot

@@ -85,7 +85,7 @@ function loanNetValue(l: LoanHealth) {
     <h2 class="text-2xl md:text-3xl font-bold">總覽</h2>
 
     <!-- Summary Cards -->
-    <div class="grid grid-cols-3 gap-3 md:gap-4">
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">
       <div class="bg-(--color-bg-card) border border-(--color-border) rounded-xl p-3 md:p-4 shadow-sm dark:shadow-none">
         <div class="text-sm text-(--color-text-secondary) uppercase">總資產</div>
         <div class="text-xl md:text-2xl font-bold mt-1">

@@ -148,16 +148,26 @@ function connectWebSocket() {
   }
 }
 
+// Interval → minutes mapping (1000 bars)
+const intervalMinutes: Record<string, number> = {
+  '1m': 1, '5m': 5, '15m': 15, '1h': 60, '4h': 240, '1d': 1440,
+}
+
 // --- Order Markers (v5 createSeriesMarkers) ---
 async function loadOrders() {
+  // Only load orders within the chart's visible time range (1000 bars)
+  const mins = intervalMinutes[chartInterval.value] ?? 60
+  const chartStartDate = new Date(Date.now() - mins * 1000 * 60000).toISOString()
+
   const { data } = await supabase
     .from('orders')
     .select('*')
     .eq('symbol', selectedSymbol.value)
     .eq('mode', filterMode.value)
     .eq('market_type', marketTab.value)
+    .gte('created_at', chartStartDate)
     .order('created_at', { ascending: true })
-    .limit(50)
+    .limit(200)
 
   if (data) {
     symbolOrders.value = data as Order[]

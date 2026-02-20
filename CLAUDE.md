@@ -151,3 +151,12 @@ pytest tests/
 - 中間 → 安全
 
 執行前會透過 LLM 進行 AI 審核（除非 dry_run=true）。
+
+## Long-term Memory
+本專案使用 Claude Code 的 auto memory 機制，記憶檔案位於：
+`~/.claude/projects/C--Github-binance-spot-bot/memory/MEMORY.md`
+
+- 此檔案每次對話自動載入，記錄專案歷史脈絡、踩坑經驗、重要決策
+- **遇到重大事件（架構變更、Bug 修復、策略調整、部署變更）時，必須同步更新 MEMORY.md**
+- 事件紀錄格式：在「近期重大事件」區塊以日期分組，倒序排列
+- 技術 know-how 歸類到對應的主題區塊（Supabase、Exchange Client、前端等）

@@ -158,6 +158,13 @@ def make_llm_decision(
         llm_override = False
         is_close_signal = llm_signal in (Signal.SELL, Signal.COVER)
         strategy_signals = {v.signal for v in verdicts}
+        # 合約模式：策略只發 BUY/SELL/HOLD，但 LLM 可發 SHORT/COVER
+        # SELL（看跌）應視為支持 SHORT，BUY（看漲）應視為支持 COVER
+        if market_type == "futures":
+            if Signal.SELL in strategy_signals:
+                strategy_signals.add(Signal.SHORT)
+            if Signal.BUY in strategy_signals:
+                strategy_signals.add(Signal.COVER)
         if llm_signal != Signal.HOLD and llm_signal not in strategy_signals and not is_close_signal:
             if decision.confidence >= 0.7:
                 logger.warning(

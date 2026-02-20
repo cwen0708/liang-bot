@@ -44,7 +44,7 @@ orderflow:
   divergence_peak_order: 5
   sfp_swing_lookback: 5
   absorption_lookback: 10
-  signal_threshold: 0.5
+  signal_threshold: 0.25
 
 # Multi-Strategy（每策略 × 4 時段，統一每 15 分鐘觸發）
 strategies:
@@ -128,7 +128,7 @@ strategies:
     params: { periods: [8, 13, 21, 34] }
   # ── Order Flow（無 K 線時段）──
   - name: "tia_orderflow"
-    params: { signal_threshold: 0.5 }
+    params: { signal_threshold: 0.25 }
 
 # LLM Decision Engine
 llm:

@@ -146,7 +146,8 @@ class SupabaseWriter:
                      market_type: str = "spot",
                      position_side: str = "long",
                      leverage: int = 1,
-                     reduce_only: bool = False) -> None:
+                     reduce_only: bool = False,
+                     trade_id: str = "") -> None:
         if not self._enabled:
             return
         try:
@@ -166,6 +167,7 @@ class SupabaseWriter:
                 "position_side": position_side,
                 "leverage": leverage,
                 "reduce_only": reduce_only,
+                "trade_id": trade_id,
             }).execute()
         except Exception as e:
             logger.debug("寫入 orders 失敗: %s", e)

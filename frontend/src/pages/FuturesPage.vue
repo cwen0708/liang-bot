@@ -64,22 +64,87 @@ const futuresOrders = computed(() =>
 )
 
 
-// ─── Trade pairs: FIFO by symbol + position_side ─────────
+// ─── Trade pairs: trade_id grouping with FIFO fallback ───
 const tradePairs = computed<FuturesTradePair[]>(() => {
   const all = futuresOrders.value.filter(o => o.status === 'filled' || o.status === 'closed')
 
-  // Group by symbol + position_side
-  const groups = new Map<string, Order[]>()
-  for (const o of all) {
-    const key = `${o.symbol}:${o.position_side ?? 'long'}`
-    const list = groups.get(key) || []
-    list.push(o)
-    groups.set(key, list)
-  }
-
   const pairs: FuturesTradePair[] = []
 
-  for (const [, groupOrders] of groups) {
+  // ── Phase 1: Group orders with trade_id ──
+  const tradeIdGroups = new Map<string, Order[]>()
+  const noTradeIdOrders: Order[] = []
+
+  for (const o of all) {
+    if (o.trade_id) {
+      const list = tradeIdGroups.get(o.trade_id) || []
+      list.push(o)
+      tradeIdGroups.set(o.trade_id, list)
+    } else {
+      noTradeIdOrders.push(o)
+    }
+  }
+
+  // Process trade_id groups
+  for (const [tradeId, groupOrders] of tradeIdGroups) {
+    const openOrder = groupOrders.find(o => !o.reduce_only)
+    const closeOrder = groupOrders.find(o => o.reduce_only)
+    if (!openOrder) continue
+
+    const positionSide = (openOrder.position_side ?? 'long') as 'long' | 'short'
+    const direction = positionSide === 'short' ? -1 : 1
+    const entryPrice = openOrder.price
+    const leverage = openOrder.leverage ?? 1
+
+    if (closeOrder) {
+      const exitPrice = closeOrder.price
+      const pnl = (exitPrice - entryPrice) * closeOrder.quantity * direction
+      const pnlPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 * direction * leverage : 0
+      const holdMs = new Date(closeOrder.created_at).getTime() - new Date(openOrder.created_at).getTime()
+      pairs.push({
+        id: `fp-${openOrder.id}`,
+        symbol: openOrder.symbol, positionSide, leverage,
+        openOrder, closeOrder,
+        entryPrice, exitPrice,
+        quantity: closeOrder.quantity, pnl, pnlPct,
+        holdDurationMs: holdMs, status: 'closed',
+      })
+    } else {
+      // Open position — check if still held
+      const stillHeld = filteredFuturesPositions.value.some(
+        p => p.symbol === openOrder.symbol && p.side === positionSide,
+      )
+      if (stillHeld) {
+        const pos = filteredFuturesPositions.value.find(
+          p => p.symbol === openOrder.symbol && p.side === positionSide,
+        )
+        const actualEntry = pos?.entry_price ?? entryPrice
+        const quantity = pos?.quantity ?? openOrder.quantity
+        const currentPrice = livePrice(openOrder.symbol, openOrder.price)
+        const pnl = (currentPrice - actualEntry) * quantity * direction
+        const pnlPct = actualEntry > 0 ? ((currentPrice - actualEntry) / actualEntry) * 100 * direction * leverage : 0
+        pairs.push({
+          id: `fp-${openOrder.id}`,
+          symbol: openOrder.symbol, positionSide, leverage,
+          openOrder, closeOrder: null,
+          entryPrice: actualEntry, exitPrice: null,
+          quantity, pnl, pnlPct,
+          holdDurationMs: Date.now() - new Date(openOrder.created_at).getTime(),
+          status: 'open',
+        })
+      }
+    }
+  }
+
+  // ── Phase 2: FIFO fallback for orders without trade_id ──
+  const fifoGroups = new Map<string, Order[]>()
+  for (const o of noTradeIdOrders) {
+    const key = `${o.symbol}:${o.position_side ?? 'long'}`
+    const list = fifoGroups.get(key) || []
+    list.push(o)
+    fifoGroups.set(key, list)
+  }
+
+  for (const [, groupOrders] of fifoGroups) {
     const sorted = [...groupOrders].sort(
       (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
     )
@@ -90,7 +155,6 @@ const tradePairs = computed<FuturesTradePair[]>(() => {
       if (isOpen) {
         unmatchedOpens.push(order)
       } else {
-        // Close order — match with an open order by quantity
         const matchIdx = unmatchedOpens.findIndex(op => quantityMatch(op.quantity, order.quantity))
         if (matchIdx >= 0) {
           const openOrder = unmatchedOpens.splice(matchIdx, 1)[0]!
@@ -104,9 +168,7 @@ const tradePairs = computed<FuturesTradePair[]>(() => {
           const holdMs = new Date(order.created_at).getTime() - new Date(openOrder.created_at).getTime()
           pairs.push({
             id: `fp-${openOrder.id}`,
-            symbol: openOrder.symbol,
-            positionSide,
-            leverage,
+            symbol: openOrder.symbol, positionSide, leverage,
             openOrder, closeOrder: order,
             entryPrice, exitPrice,
             quantity: order.quantity, pnl, pnlPct,
@@ -116,20 +178,15 @@ const tradePairs = computed<FuturesTradePair[]>(() => {
       }
     }
 
-    // Unmatched opens — cross-check with positions table to avoid ghost entries
-    // positions 表用 upsert (symbol+side) 只保留一筆，所以每個 symbol+side 也只取最新的開倉單
     if (unmatchedOpens.length > 0) {
-      // 取最新的一筆（unmatchedOpens 已按時間排序，最新在最後）
       const latestOpen = unmatchedOpens[unmatchedOpens.length - 1]!
       const positionSide = (latestOpen.position_side ?? 'long') as 'long' | 'short'
       const direction = positionSide === 'short' ? -1 : 1
 
-      // 若 positions 表中已無此 symbol+side 的持倉，表示已被 SL/TP 或其他方式平掉
       const stillHeld = filteredFuturesPositions.value.some(
         p => p.symbol === latestOpen.symbol && p.side === positionSide,
       )
       if (stillHeld) {
-        // 用 positions 表的入場價和數量（更準確，因為 upsert 會更新）
         const pos = filteredFuturesPositions.value.find(
           p => p.symbol === latestOpen.symbol && p.side === positionSide,
         )
@@ -141,9 +198,7 @@ const tradePairs = computed<FuturesTradePair[]>(() => {
         const pnlPct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 * direction * leverage : 0
         pairs.push({
           id: `fp-${latestOpen.id}`,
-          symbol: latestOpen.symbol,
-          positionSide,
-          leverage,
+          symbol: latestOpen.symbol, positionSide, leverage,
           openOrder: latestOpen, closeOrder: null,
           entryPrice, exitPrice: null,
           quantity, pnl, pnlPct,

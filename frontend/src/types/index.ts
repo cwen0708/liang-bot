@@ -59,6 +59,7 @@ export interface Order {
   position_side: 'long' | 'short' | null
   leverage: number
   reduce_only: boolean
+  trade_id?: string
 }
 
 export interface Position {

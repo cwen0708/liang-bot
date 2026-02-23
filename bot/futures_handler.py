@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -410,6 +411,7 @@ class FuturesHandler:
 
         entry_horizon = decision.horizon
         entry_reasoning = decision.reasoning
+        trade_id = f"t-{uuid.uuid4().hex[:12]}"
 
         self._risk.add_position(
             symbol, side, risk_output.quantity, fill_price, leverage,
@@ -418,6 +420,7 @@ class FuturesHandler:
             take_profit_price=risk_output.take_profit_price,
             entry_horizon=entry_horizon,
             entry_reasoning=entry_reasoning,
+            trade_id=trade_id,
         )
 
         _mode = fc.mode.value
@@ -426,6 +429,7 @@ class FuturesHandler:
             order, mode=_mode, cycle_id=cycle_id,
             market_type="futures", position_side=side,
             leverage=leverage, reduce_only=False,
+            trade_id=trade_id,
         )
         self._db.upsert_position(symbol, {
             "side": side,
@@ -455,6 +459,10 @@ class FuturesHandler:
         """執行合約平倉（平多或平空）。"""
         fc = self._settings.futures
         close_signal = Signal.SELL if side == "long" else Signal.COVER
+
+        # 取得 trade_id（平倉前取，因為 remove_position 會移除持倉）
+        pos = self._risk.get_position(symbol, side)
+        trade_id = pos.get("trade_id", "") if pos else ""
 
         tp_id, sl_id = self._risk.get_sl_tp_order_ids(symbol, side)
         if tp_id or sl_id:
@@ -491,6 +499,7 @@ class FuturesHandler:
             order, mode=_mode, cycle_id=cycle_id,
             market_type="futures", position_side=side,
             leverage=fc.leverage, reduce_only=True,
+            trade_id=trade_id,
         )
         self._db.delete_position(symbol, mode=_mode, market_type="futures", side=side)
 
@@ -544,8 +553,12 @@ class FuturesHandler:
         return self._HORIZON_MIN_HOLD.get(horizon, 60)
 
     def _sync_sl_tp(self, symbol: str, side: str) -> bool:
-        """檢查合約 SL/TP 掛單是否已成交。"""
+        """檢查合約 SL/TP 掛單是否已成交。若已成交，記錄為訂單。"""
         tp_id, sl_id = self._risk.get_sl_tp_order_ids(symbol, side)
+        # 取得 trade_id（移除持倉前取）
+        pos = self._risk.get_position(symbol, side)
+        trade_id = pos.get("trade_id", "") if pos else ""
+
         for order_id, label in [(tp_id, "停利"), (sl_id, "停損")]:
             if not order_id:
                 continue
@@ -553,8 +566,31 @@ class FuturesHandler:
                 status = self._exchange.get_order_status(order_id, symbol)
                 if status["status"] == "closed":
                     fill_price = status.get("price", 0)
+                    fill_qty = pos.get("quantity", 0) if pos else 0
                     pnl = self._risk.remove_position(symbol, side, fill_price)
                     _mode = self._settings.futures.mode.value
+                    fc = self._settings.futures
+
+                    # 記錄 SL/TP 成交為訂單（修復「隱形平倉」問題）
+                    close_side = "sell" if side == "long" else "buy"
+                    sl_tp_order = {
+                        "symbol": symbol,
+                        "side": close_side,
+                        "type": "market",
+                        "amount": fill_qty,
+                        "price": fill_price,
+                        "filled": fill_qty,
+                        "status": "filled",
+                        "id": order_id,
+                        "source": "sl_tp",
+                    }
+                    self._db.insert_order(
+                        sl_tp_order, mode=_mode, cycle_id="",
+                        market_type="futures", position_side=side,
+                        leverage=fc.leverage, reduce_only=True,
+                        trade_id=trade_id,
+                    )
+
                     self._db.delete_position(symbol, mode=_mode, market_type="futures", side=side)
                     logger.info(
                         "%s[合約] 交易所 %s 成交: %s %s @ %.2f, PnL=%.2f USDT",
